@@ -156,7 +156,7 @@ test("exact update ref accepts version tag or commit SHA, never main", () => {
     buildInstallSpec(manifest("0.3.2", { ref: "0123456789abcdef0123456789abcdef01234567" })),
     /#0123456789abcdef0123456789abcdef01234567$/,
   );
-  assert.throws(() => buildInstallSpec(manifest("0.3.2", { ref: "main" })), /精确 Git ref/);
+  assert.throws(() => buildInstallSpec(manifest("0.3.2", { ref: "main" })), /正式 tag 或精确 commit SHA/);
 });
 
 test("Cloud manifest absence falls back to an exact GitHub stable tag", async () => {
