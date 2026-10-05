@@ -67,7 +67,7 @@ window.__ModuleLoader__.load({
       permissionMode: "权限模式",
       trustedMode: "受信任工作区模式",
       trustedHint: "在已授权 Workspace 内，Connector 不额外限制 Harness 的文件、Shell、Git、Build、Test 与其他工具能力；实际权限仍由 Harness Profile、工具审批和操作系统决定。",
-      restrictedHint: "关闭后进入受限模式。beta.3 会暂停远程任务领取，而不是伪造一个并不存在的半权限沙箱。",
+      restrictedHint: "关闭后进入受限模式。0.2.1 会暂停远程任务领取，而不是伪造一个并不存在的半权限沙箱。",
       advanced: "高级设置",
       poll: "Poll interval (ms)",
       heartbeatInterval: "Heartbeat interval (ms)",
@@ -140,6 +140,44 @@ window.__ModuleLoader__.load({
     const fieldStyle = { display: "grid", gap: 6, minWidth: 220, flex: "1 1 260px" };
     const mutedStyle = { opacity: 0.72, fontSize: 13, lineHeight: 1.5, margin: 0 };
 
+    function remoteCode(error) {
+      return typeof error?.code === "string" && error.code ? error.code : "unknown";
+    }
+
+    function hostRemoteFailure(error, operation) {
+      const code = remoteCode(error);
+      if (["gateway/service-unavailable", "gateway/invocation-unavailable"].includes(code)) {
+        return `Host Remote 不可用（${code}，${operation}）`;
+      }
+      if (["gateway/definition-unavailable", "gateway/method-unavailable"].includes(code)) {
+        return `Gateway service unavailable（${code}，${operation}）`;
+      }
+      if (code.startsWith("gateway/")) {
+        return `Host Remote 调用失败（${code}，${operation}）`;
+      }
+      return `Host Remote 调用失败（${code}，${operation}）`;
+    }
+
+    function credentialFailure(error, operation) {
+      const code = remoteCode(error);
+      if (code === "credential/rejected") {
+        return operation === "set"
+          ? "Token 保存失败：Credential provider 拒绝写入（credential/rejected）"
+          : "Credential provider 拒绝读取（credential/rejected）";
+      }
+      if (["gateway/service-unavailable", "gateway/invocation-unavailable", "gateway/method-unavailable"].includes(code)) {
+        return `Credential Remote 不可用（${code}）`;
+      }
+      if (code === "gateway/internal") {
+        return operation === "set"
+          ? "Credential provider 不可写或不可用（gateway/internal）"
+          : "Credential provider 不可用（gateway/internal）";
+      }
+      return operation === "set"
+        ? `Token 保存失败（${code}）`
+        : `Credential 读取失败（${code}）`;
+    }
+
     function stateDot(value) {
       if (["loaded", "configured", "online", "native"].includes(value)) return "done";
       if (value === "detecting") return "ongoing";
@@ -178,6 +216,7 @@ window.__ModuleLoader__.load({
       const [credential, setCredential] = useState(undefined);
       const [status, setStatus] = useState(undefined);
       const [statusFailed, setStatusFailed] = useState(false);
+      const [statusMessage, setStatusMessage] = useState("");
       const [tokenInput, setTokenInput] = useState("");
       const [generatedToken, setGeneratedToken] = useState("");
       const [tokenMessage, setTokenMessage] = useState("");
@@ -223,16 +262,22 @@ window.__ModuleLoader__.load({
       }, [workspaceSnapshot?.phase, workspaceKey]);
 
       const refreshCredential = async () => {
-        try { setCredential(await actions.describeCredential()); }
-        catch { setCredential(undefined); }
+        try {
+          setCredential(await actions.describeCredential());
+        } catch (error) {
+          setCredential(undefined);
+          setTokenMessage(error instanceof Error ? error.message : "Credential 读取失败");
+        }
       };
       const refreshStatus = async () => {
         try {
           setStatus(await actions.status());
           setStatusFailed(false);
-        } catch {
+          setStatusMessage("");
+        } catch (error) {
           setStatus(undefined);
           setStatusFailed(true);
+          setStatusMessage(error instanceof Error ? error.message : "Host Remote 不可用");
         }
       };
       useEffect(() => {
@@ -274,15 +319,18 @@ window.__ModuleLoader__.load({
       const storeToken = async (value) => {
         if (!value) return;
         setTokenMessage("");
+        if (credential?.writable === false) {
+          setTokenMessage("Credential provider 不可写。");
+          return;
+        }
         try {
-          const ok = await actions.storeCredential(value);
-          if (!ok) { setTokenMessage(t("saveFailed")); return; }
+          await actions.storeCredential(value);
           setTokenInput("");
           setGeneratedToken("");
           await refreshCredential();
           await refreshStatus();
-        } catch {
-          setTokenMessage(t("saveFailed"));
+        } catch (error) {
+          setTokenMessage(error instanceof Error ? error.message : "Token 保存失败");
         }
       };
 
@@ -292,8 +340,8 @@ window.__ModuleLoader__.load({
           const value = await actions.generateToken();
           setGeneratedToken(value);
           setTokenInput("");
-        } catch {
-          setTokenMessage(t("saveFailed"));
+        } catch (error) {
+          setTokenMessage(error instanceof Error ? error.message : "Host Remote 不可用");
         }
       };
 
@@ -421,6 +469,7 @@ window.__ModuleLoader__.load({
           status?.missingWorkspaceIds?.length
             ? h("p", { role: "alert", style: mutedStyle }, t("workspaceMissingStatus")) : null,
           status?.lastError ? h("p", { style: mutedStyle }, status.lastError) : null,
+          statusMessage ? h("p", { role: "alert", style: mutedStyle }, statusMessage) : null,
         ),
 
         h("section", { style: sectionStyle },
@@ -523,27 +572,28 @@ window.__ModuleLoader__.load({
         subscribeWorkspaces: (listener) => ctx.workspaces.list.subscribe(listener),
         async status() {
           const response = await ctx.remote.deepseekWorkerConnector.status();
-          if (!response.ok) throw response.error;
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "status"));
           return response.value;
         },
         async test() {
           const response = await ctx.remote.deepseekWorkerConnector.test();
-          if (!response.ok) throw response.error;
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "test"));
           return response.value;
         },
         async generateToken() {
           const response = await ctx.remote.deepseekWorkerConnector.generateToken();
-          if (!response.ok) throw response.error;
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "generateToken"));
           return response.value.token;
         },
         async describeCredential() {
           const response = await ctx.remote.credentials.describe([TOKEN_REF]);
-          if (!response.ok) throw response.error;
+          if (!response.ok) throw new Error(credentialFailure(response.error, "describe"));
           return response.value[TOKEN_REF] || { configured: false, writable: false };
         },
         async storeCredential(value) {
           const response = await ctx.remote.credentials.set(TOKEN_REF, value);
-          return response.ok;
+          if (!response.ok) throw new Error(credentialFailure(response.error, "set"));
+          return true;
         },
       };
 

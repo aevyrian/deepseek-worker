@@ -41,7 +41,7 @@ if ($Profile) {
   if ($bundles -notcontains 'deepseek-worker-connector') {
     throw "Harness profile '$Profile' does not list deepseek-worker-connector in dsh.profile.bundles."
   }
-  Write-Host "Harness profile '$Profile' contains the connector bundle. Confirm beta.3 UI and Remote activation in Desktop."
+  Write-Host "Harness profile '$Profile' contains the connector bundle. Confirm 0.2.1 Host Remote discovery, Credentials, and UI activation in Desktop."
 }
 
 Write-Host 'Local checks passed. No Site requests, D1 writes, credential reads, or profile changes were made by this test script.'

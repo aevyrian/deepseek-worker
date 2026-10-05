@@ -1,6 +1,6 @@
-# DeepSeek Worker Connector beta.3 设计
+# DeepSeek Worker Connector 0.2.1 设计
 
-本文档记录 0.1.0-beta.3 的本地 Connector 架构。Cloud Site、D1、MCP 与 /api/worker/* 不属于本轮修改范围。
+本文档记录 0.2.1 的本地 Connector 架构。Cloud Site、D1、MCP 与 /api/worker/* 不属于本轮修改范围。
 
 ## 1. 核心边界
 
@@ -10,7 +10,7 @@ ChatGPT → DeepSeek Worker Cloud → DeepSeek Harness Connector → Harness Wor
 
 Cloud 负责任务与租约；Connector 负责本机接入；Harness 负责真实项目执行与权限。
 
-beta.3 的唯一项目边界是 Harness 官方 Workspace。
+0.2.1 的唯一项目边界是 Harness 官方 Workspace。
 
 ## 2. 为什么废弃 Connector 自维护路径映射
 
@@ -21,7 +21,7 @@ beta.2 同时存在 Harness Workspace 与 Connector 自己的 alias/path map，�
 
 这会重复状态，也让 Session 与 Workspace 关系无法由 Harness 自己保证。
 
-beta.3 删除功能性的手工路径映射。持久化只保留：
+0.2.1 删除功能性的手工路径映射。持久化只保留：
 
     authorizedWorkspaceIds: string[]
     trustedWorkspaceMode: boolean
@@ -79,7 +79,7 @@ beta.2 的 Browser half 做了 contribution mount，但真正读取 ctx.remote.d
 
 Harness Cordis Remote namespace 是一个 service 依赖；mount 只创建 namespace，不替调用方声明依赖。
 
-beta.3 生命周期：
+0.2.1 生命周期：
 
 1. 外层 Client plugin 只 inject remote。
 2. await ctx.remote.$mount(contribution)。
@@ -96,19 +96,48 @@ beta.3 生命周期：
 
 这与 Harness 官方 optional Remote assembly 模式一致。
 
-## 7. Host Remote
+## 7. Host Remote 注册与 Gateway discovery
 
-Host 继续提供三个无业务入参方法：
+0.2.1 的关键修复是 Host Service 的注册位置。
 
-    deepseekWorkerConnector.status()
-    deepseekWorkerConnector.generateToken()
-    deepseekWorkerConnector.test()
+Harness 当前 API Gateway 在自己的 Host Context 上执行 source-mode discovery：
 
-status 返回脱敏状态，不含 Token。
+1. 遍历 `ctx.reflect.props` 中的 Cordis Service。
+2. 使用 `ctx.get(serviceKey)` 取得当前 Context 可见的 receiver。
+3. 读取 receiver 的 `typertRemote`。
+4. 比对 namespace。
+5. 读取 `remoteMethods(original)` 并匹配 method。
+6. 调用前再次通过 service key 取得 receiver。
 
-generateToken 使用 crypto.randomBytes(32) 生成一次性 64 hex Token。
+因此 Remote owner 必须是真正注册到 Loader/Host Service registry 的 Cordis Service，而不是只在某个 dependency inject child scope 临时 new 的对象。
 
-test 在 Host resolve Credential 后请求现有 register API。
+0.2.1 的 Host entry：
+
+    export class WorkerControlService extends TypertRemoteService {
+      static inject = ["workspaceRegistry"]
+      static Config = Config
+
+      constructor(ctx, input = {}) {
+        super(ctx, "deepseekWorkerConnectorControl", {
+          namespace: "deepseekWorkerConnector"
+        })
+        ...
+      }
+    }
+
+    export default WorkerControlService
+
+对应：
+
+    Cordis service key = deepseekWorkerConnectorControl
+    Remote namespace   = deepseekWorkerConnector
+
+`status / generateToken / test` 的 Remote markers 仍由 Typert protocol 的 `Remote` initializer 写到 class prototype，Gateway 的 `remoteMethods()` 可以发现。
+
+Worker polling loop 通过 `ctx.effect(...)` 附着到这个正式 Host Service 生命周期；它不再包住、创建或决定 Remote owner 的注册。
+
+Credentials 不列入 static inject。理由与 Harness 官方 CredentialsController 相同：Remote owner 应保持可发现，业务调用时再通过 `ctx.get("credentials")` 检查 provider。这样 credential provider 缺失会得到可操作错误，而不是使整个 Connector namespace 消失。
+
 
 ## 8. Execution 状态
 
@@ -127,7 +156,7 @@ Browser Remote 尚未返回时显示 detecting；调用失败显示 unknown。
 
 官方 SessionCreateRequest 支持 workspaceId 或 cwd，二选一。
 
-beta.3 新任务只使用：
+0.2.1 新任务只使用：
 
     sessionController.create({ workspaceId })
 
@@ -144,7 +173,7 @@ Harness Session Controller 自己：
 
 不能把 create({ sessionId, workspaceId }) 当作 resume，因为官方 create/adopt 路径在持久 Session 不存在时可能创建新身份。
 
-beta.3 显式拆开：
+0.2.1 显式拆开：
 
 1. Workspace.sessionIds 必须包含 sessionId。
 2. sessionController.inspect(sessionId) 必须成功。
@@ -208,7 +237,7 @@ true 的含义：
 - 文件权限
 - 网络权限
 
-false 的 beta.3 行为是暂停远程 claim。原因是 Connector 当前没有独立、可证明正确的“受限 Harness Workspace”权限模型；暂停比制造一个表面安全但语义错误的第二套权限层更可靠。
+false 的 0.2.1 行为是暂停远程 claim。原因是 Connector 当前没有独立、可证明正确的“受限 Harness Workspace”权限模型；暂停比制造一个表面安全但语义错误的第二套权限层更可靠。
 
 ## 14. Credential
 
@@ -268,17 +297,19 @@ Browser 不执行 Bearer fetch。
 
 ## 18. 自动验证
 
-beta.3 测试拆成：
+0.2.1 测试拆成：
+
+- host-remote-discovery.test.mjs：加载真实 Host entry，并按 Gateway discovery 结构验证 Service 可发现与三个 Remote 可调用。
 
 - client.test.mjs：Remote mount/inject/dispose、Remote methods、Workspace service、状态 fallback。
 - config.test.mjs：WorkspaceId 配置、失效 ID、Token、Secret、Execution 状态。
 - native-session.test.mjs：workspaceId create、continue、membership/cwd 校验、assistant result。
 - protocol.test.mjs：Cloud WorkspaceId allowlist、path 拒绝、Worker protocol。
 
-GitHub Actions Node 22 结果：
+GitHub Actions windows-latest / Node 22 结果：
 
-    24 tests
-    24 pass
+    28 tests
+    28 pass
     0 fail
 
 index.js、client.js、connector-config.mjs、protocol.mjs、native-session.mjs 的 node --check 均通过。
@@ -298,4 +329,4 @@ index.js、client.js、connector-config.mjs、protocol.mjs、native-session.mjs 
 - continue / rework。
 - Trusted Workspace 下真实文件、Shell、Git、build、test 能力。
 
-只有这些通过后，才适合把 beta.3 继续推进为稳定版。
+这些项目用于确认 0.2.1 在真实 Windows DeepSeek Harness Desktop 上完成闭环。

@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.1
+
+### Fixed
+
+- Host Remote owner 不再创建在 `ctx.inject(["credentials", "workspaceRegistry"], childScope)` 中。
+- Connector Host 插件现在直接导出正式 `TypertRemoteService`：
+  - service key: `deepseekWorkerConnectorControl`
+  - namespace: `deepseekWorkerConnector`
+- Worker loop 改为 Host Service 生命周期 effect，不再决定 Gateway 能否发现 Remote Service。
+- `status / generateToken / test` 现在按 Harness API Gateway 当前 source-mode discovery 所需的 Host Service registry 结构注册。
+- Credential provider 改为通过 `ctx.get("credentials")` 可选解析，provider 缺失时 Remote namespace 仍可存在并返回明确状态。
+- “生成随机 Token”与 Credentials 异常不再统一显示“配置保存失败”。
+
+### UI / diagnostics
+
+- 新增 Host Remote 不可用、Gateway service unavailable、Credential Remote 不可用、Credential provider 不可写/不可用、Token 保存失败等区分提示。
+- UI 不直接显示 Remote 原始错误文本作为 Token 保存错误。
+- Credential provider 拒绝写入时只显示错误类别，不回显 Token。
+
+### Preserved
+
+- Harness WorkspaceId / authorizedWorkspaceIds。
+- trustedWorkspaceMode。
+- Native Session create / continuation。
+- `ctx.credentials` 与官方 `ctx.remote.credentials.describe/set`。
+- Cloud API、D1、MCP、Secrets 与所有 `/api/worker/*` 均未修改。
+
+### Validation
+
+Windows GitHub Actions / Node 22：
+
+- 所有 JavaScript / MJS syntax check 通过。
+- `npm test`：28/28 通过。
+- 新 Host discovery 测试加载真实 `index.js` / `WorkerControlService`，按 Harness Gateway 当前 discovery 结构验证 `reflect.props → ctx.get(serviceKey) → typertRemote → remoteMethods`，并经该发现路径调用 `status / generateToken / test`。
+- 新 Credentials 测试验证 describe/set 错误分类和 Token 不泄露。
+
 ## 0.1.0-beta.3
 
 ### Fixed

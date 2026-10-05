@@ -2,207 +2,214 @@
 
 DeepSeek Harness 原生本地 Worker Connector：让 ChatGPT 的 DeepSeek Worker Cloud 调度本机 Harness Workspace 中的真实 Session、Agent 与工具。
 
-当前版本：0.1.0-beta.3
+当前版本：**0.2.1**
 
-## 架构
+## 本版本解决的问题
 
-ChatGPT → DeepSeek Worker Site → HTTPS + Bearer → DeepSeek Worker Connector → DeepSeek Harness Desktop。
+Windows DeepSeek Harness Desktop 真机已经确认：
 
-本仓库只维护本地 Connector。beta.3 不修改 ChatGPT Site、D1、MCP、Secrets 或任何 /api/worker/* 云端接口。
+- 插件可以正常安装、启用；
+- 中文配置页正常；
+- `ctx.workspaces` 能列出真实 Workspace；
+- Workspace 勾选正常；
+- 但 0.1.0-beta.3 的自定义 Host Remote 没有被 Gateway 正确发现，因此 Execution 一直“未知”，`status / generateToken / test` 无法调用。
 
-继续复用已有 Worker API：
+0.2.1 不再重复修改 Client inject，而是修 Host Remote owner 的注册位置。
 
-- POST /api/worker/register
-- POST /api/worker/heartbeat
-- POST /api/worker/claim
-- POST /api/worker/lease/renew
-- POST /api/worker/events
-- POST /api/worker/result
-- POST /api/worker/failure
+## Host Remote：0.2.1 的核心修复
 
-## beta.3 重点变化
+Harness 当前 API Gateway 的 source-mode discovery 会在 Gateway 所在 Host Context 上：
 
-- 修复 Windows Harness Desktop 中 remote.deepseekWorkerConnector 未声明 inject 的错误。
-- 配置页直接读取 Harness 官方 workspaces Client service。
-- 用户只勾选已有 Workspace，不再输入 Workspace ID 或本地绝对路径。
-- 配置只保存 authorizedWorkspaceIds。
-- Cloud 的 workspace_id 现在就是实际 Harness WorkspaceId。
-- 新 Native Session 使用 sessionController.create({ workspaceId })。
-- continue / rework 必须恢复原 Session，并校验它仍属于请求的 Workspace。
-- 增加 trustedWorkspaceMode，默认 true。
-- Remote 状态读取失败时显示“检测中 / 未知”，不再误显示 Headless fallback。
-- Token 继续只保存在 Harness Credentials。
-- Cloud task 即使在 Trusted 模式下也不能注入 cwd、path、workspace_path 或 local_path。
+1. 遍历 `ctx.reflect.props` 的 Service；
+2. 对每个 service key 调用 `ctx.get(serviceKey)`；
+3. 读取 Service 的 `typertRemote` binding；
+4. 读取 `@Remote` 方法标记；
+5. 将 namespace/method 解析到真实 receiver。
 
-## 安装
+旧实现把 `WorkerControlService` 创建在：
 
-在 DeepSeek Harness 插件管理器中添加：
+    ctx.inject(["credentials", "workspaceRegistry"], async (scope) => {
+      new WorkerControlService(scope, input, runtime)
+      ...
+    })
 
-https://github.com/aevyrian/deepseek-worker.git
+这个 child scope 并不是 Gateway 用于普通 direct Remote receiver discovery 的正确 owner。
 
-也可以使用 CLI：
+0.2.1 改为让 Connector Host 插件本身成为正式 Loader entry Service：
 
-dsh plugin --profile <你的-profile> add https://github.com/aevyrian/deepseek-worker.git
+    export class WorkerControlService extends TypertRemoteService {
+      static inject = ["workspaceRegistry"]
+      static Config = Config
 
-启用 Bundle 后打开：插件 → DeepSeek Worker Connector → deepseek-worker-connector → 配置。
+      constructor(ctx, config) {
+        super(ctx, "deepseekWorkerConnectorControl", {
+          namespace: "deepseekWorkerConnector"
+        })
+        ...
+      }
+    }
 
-## 推荐使用流程
+    export default WorkerControlService
 
-1. 在 Harness 左侧“工作区”创建项目。
-2. 打开 Connector 配置页。
-3. 勾选允许 DeepSeek Worker 使用的 Harness Workspace。
-4. 配置 Worker Token。
-5. 保持“受信任工作区模式”开启。
-6. 保存配置。
-7. 点击“测试连接”。
-8. 从 ChatGPT 创建本地任务。
-9. Connector 在对应 Harness Workspace 创建或恢复 Session。
+因此以下 Service / namespace 现在由 Loader/Host Context 正式注册：
 
-## Harness Workspaces
+    service key:
+    deepseekWorkerConnectorControl
 
-Browser Client 使用 Harness 官方 ctx.workspaces.list.getSnapshot() 与 subscribe() 读取实时 Workspace 列表。每一项来自官方 WorkspaceView，Connector UI 主要使用 workspaceId 与 title，不要求用户输入或维护本地路径。
+    namespace:
+    deepseekWorkerConnector
 
-配置只保存类似：
+Browser 继续调用：
+
+    ctx.remote.deepseekWorkerConnector.status()
+    ctx.remote.deepseekWorkerConnector.generateToken()
+    ctx.remote.deepseekWorkerConnector.test()
+
+Worker polling loop 只是这个 Service 生命周期中的 effect，不再决定 Remote Service 是否存在。
+
+## Client Remote lifecycle
+
+0.1.0-beta.3 已经修复的 Browser fiber inject 保留，不重新改回旧方案：
+
+1. `ctx.remote.$mount(contribution)`
+2. UI fiber inject：
+   - `remote`
+   - `remote.deepseekWorkerConnector`
+   - `remote.credentials`
+   - `workspaces`
+   - `slots`
+   - `locale`
+3. dispose UI
+4. dispose Remote contribution
+
+0.2.1 的修复重点是 Host 侧 Service discovery。
+
+## Harness Workspace
+
+Workspace 架构保持不变。
+
+Browser 继续使用：
+
+    ctx.workspaces.list.getSnapshot()
+    ctx.workspaces.list.subscribe(...)
+
+Host 继续使用：
+
+    ctx.workspaceRegistry.list()
+    ctx.workspaceRegistry.get(workspaceId)
+
+Connector 配置只保存：
 
     authorizedWorkspaceIds:
       - workspace-xxx
-      - workspace-yyy
     trustedWorkspaceMode: true
 
-不再保存自定义 Workspace alias、alias → 本地目录映射或本地绝对路径副本。
+不保存本地 path map。
 
-如果 Harness 中删除了已授权 Workspace，UI 会从当前草稿移除失效 ID 并提示保存；Host 在持久配置尚未修正前也会 fail closed，不继续领取任务。
+Cloud 的 `workspace_id` 仍然直接对应 Harness `WorkspaceId`。
 
-## Cloud Workspace 语义
+Cloud task 中出现以下本地路径字段仍会被拒绝：
 
-注册 Worker 时继续使用原协议字段 workspace_allowlist，但其中的值现在是真实 Harness WorkspaceId。
+- `cwd`
+- `path`
+- `workspace_path`
+- `local_path`
 
-Cloud task 的 workspace_id 也必须是真实 WorkspaceId。
+## Native Session
 
-Host 收到任务后：
-
-1. 确认 workspace_id 属于 authorizedWorkspaceIds。
-2. 通过 ctx.workspaceRegistry.get(workspaceId) 确认 Workspace 当前仍存在。
-3. 把官方 Workspace 对象交给本地执行路径。
-4. 不自己拼接或接受 Cloud 指定的本地路径。
-
-Connector 明确拒绝 Cloud task 中出现 cwd、path、workspace_path 或 local_path。
-
-## Native Harness Session
-
-新任务使用当前官方 Session Controller：
+新任务继续走：
 
     sessionController.create({ workspaceId })
 
-Harness 自己解析 Workspace 的 canonical path 并把新 Session 附着到该 Workspace。Connector 不再自己解析项目路径后传 cwd。
+continue / rework 继续要求：
 
-如果 Cloud 带已有 session_id，Connector 会先验证：
+- Session 属于目标 Workspace；
+- Session 可以被 inspect；
+- Session 持久化 cwd 与官方 Workspace canonical path 一致；
+- 然后 `sessionController.resolveAgent(sessionId)` 恢复原 Agent；
+- 不会在恢复失败时静默创建替代 Session。
 
-1. Session ID 仍存在于目标 Workspace 的 sessionIds。
-2. sessionController.inspect(sessionId) 能读取该 Session。
-3. Session 的持久化 cwd 与当前官方 Workspace canonical path 一致。
-4. 再调用 sessionController.resolveAgent(sessionId) 恢复原 Agent。
+Prompt 使用 `sessionController.prompt(...)`，完成以本次任务后的 `turn/end` 与 `assistant/message` 为准。
 
-任一步失败都会显式失败，不会静默创建新 Session。
+## Trusted Workspace
 
-Prompt 使用 sessionController.prompt(...)。Connector 等待该 Session 的 turn/end，再读取本次任务开始位置之后的最新 assistant/message 作为结果。
+`trustedWorkspaceMode` 默认 `true`。
 
-## 受信任工作区模式
+在用户明确授权的 Workspace 内，Connector 不额外增加第二层文件只读、Shell 白名单或 Git/build/test 限制。实际能力仍由当前 Harness Profile、permission preset、sandbox、工具审批、Agent/Tool 与操作系统决定。
 
-默认 trustedWorkspaceMode: true。
+关闭 Trusted Workspace 时，0.2.1 暂停远程 claim，而不是伪造一个未实现的半权限沙箱。
 
-它的含义是：对用户明确勾选的 Harness Workspace，Connector 自己不再附加一层文件只读、Shell 命令白名单或重复的项目权限限制。
+## Worker Token / Credentials
 
-因此，只要当前 Harness Profile / Agent 本身允许，任务可以使用 Harness 已有的文件读写、新建/删除项目文件、Shell、Git、npm/pnpm、build、test、Harness Tools、网络与 Agent/subagent。
+固定 Credential ref：
 
-仍然由 DeepSeek Harness 与操作系统控制：
+    LOCAL_WORKER_TOKEN
 
-- Harness permission preset / sandbox
-- Harness 工具审批
-- Agent / Tool 自身能力
-- 操作系统文件权限
-- 网络环境
-- 用户安装的插件与工具
+Host Worker 自己读取 Secret 时使用 Harness credential provider。
 
-Connector 不修改 Harness 核心代码，也不绕过 Harness 自己的权限系统。
+Browser 保存和查询状态使用官方：
 
-Workspace 仍然是唯一项目边界：已授权 Workspace 内不额外收紧 Harness；Workspace 外不接受 Cloud 指定任意主机路径。
+    ctx.remote.credentials.describe(["LOCAL_WORKER_TOKEN"])
+    ctx.remote.credentials.set("LOCAL_WORKER_TOKEN", value)
 
-关闭 Trusted Workspace 后，beta.3 不伪造一个新的“半权限沙箱”。当前行为是允许测试 Cloud 连接，但后台 Worker 暂停 claim。
+官方 Credentials Remote 不返回 Secret；`describe` 只返回 configured/source/writable 等元数据。
 
-## Worker Token
+0.2.1 改善了错误显示：
 
-固定 Credential ref 是 LOCAL_WORKER_TOKEN。
+- Host Remote 没被 Gateway 发现：
+  - `Host Remote 不可用（gateway/...）`
+- Gateway 找不到方法/定义：
+  - `Gateway service unavailable（gateway/...）`
+- Credential Remote 缺失：
+  - `Credential Remote 不可用`
+- Credential provider 不可用/不可写：
+  - `Credential provider 不可写或不可用`
+- provider 拒绝写入：
+  - `Token 保存失败：Credential provider 拒绝写入`
 
-Token 继续通过 Harness Credentials 保存。Host 使用 ctx.credentials.resolve；Browser 使用 remote.credentials.describe/set。已保存 Token 只能看到“已配置 / 未配置”，不能从 Browser 读回 Secret。
+UI 不再把“生成随机 Token”或 Credential Remote 异常统一显示成“配置保存失败”。
 
-“生成随机 Token”由 Host 使用 crypto.randomBytes(32)，输出 64 位 hex。刚生成时 Browser 临时显示一次，保存后清空。
+Remote/Provider 原始错误文本不会直接拼到 Token 保存错误中，因此不会把 Token 回显到 UI。
 
-Token 不进入 Connector Config、Workspace 配置、Git、URL、Local Storage、status Remote 或日志明文。
+## 状态
 
-## Remote namespace 修复
+配置页显示：
 
-beta.2 虽然执行了 ctx.remote.$mount(contribution)，但真正读取 ctx.remote.deepseekWorkerConnector 的 UI fiber 没有声明该依赖。
+- Connector
+- Execution
+- Credential
+- Cloud
+- Worker
+- 最后心跳
 
-beta.3 按 Harness 官方 Remote lifecycle 改为：
+Execution：
 
-1. ctx.remote.$mount(contribution)
-2. 创建 UI fiber，并 inject：
-   - remote
-   - remote.deepseekWorkerConnector
-   - remote.credentials
-   - workspaces
-   - slots
-   - locale
-3. UI dispose
-4. Remote dispose
+- Host 找到 Session Controller → `Native Harness`
+- Host 明确找不到 → `Headless fallback`
+- status 尚未返回 → `检测中`
+- Host Remote / Gateway 调用失败 → `未知`，并显示具体 Remote 类别
 
-所以不是用 try/catch 掩盖 cannot get property ... without inject，而是真正声明依赖。
+## Cloud
 
-## Harness 状态
+**0.2.1 没有修改 Cloud。**
 
-页面显示 Connector、Execution、Credential、Cloud、Worker 和最后心跳。
+没有修改：
 
-Execution 规则：
+- ChatGPT Site
+- D1
+- MCP
+- Secrets
+- `/api/worker/register`
+- `/api/worker/heartbeat`
+- `/api/worker/claim`
+- `/api/worker/lease/renew`
+- `/api/worker/events`
+- `/api/worker/result`
+- `/api/worker/failure`
 
-- Host 明确检测到 Session Controller → Native Harness
-- Host 明确检测不到 → Headless fallback
-- Remote 仍在读取 → 检测中
-- Remote 调用失败 → 未知
+注册仍将真实 Harness WorkspaceIds 作为现有 `workspace_allowlist` 发送。
 
-不会再因为 status Remote 失败而默认显示 Headless。
-
-## 测试连接
-
-按钮先保存当前页面草稿，然后由 Host：
-
-1. 校验配置。
-2. 至少确认一个授权 Harness Workspace。
-3. 确认所有授权 Workspace 当前仍存在。
-4. resolve LOCAL_WORKER_TOKEN。
-5. 请求现有 POST /api/worker/register。
-6. 把 authorizedWorkspaceIds 作为 workspace_allowlist 报给 Cloud。
-7. 返回脱敏 Cloud / Worker 状态。
-
-Browser 不直接拿 Bearer Token 请求 Cloud。
-
-## 后台 Worker
-
-- 无授权 Workspace → paused
-- 授权 Workspace 已被删除 → paused
-- trustedWorkspaceMode = false → paused
-- 有 Workspace 但无 Token → paused
-- Token + 有效授权 Workspace + Trusted → register → heartbeat → claim → WorkspaceId 验证 → Native Session / Headless fallback → result / failure
-
-## Headless fallback
-
-Headless 仍是最后 fallback，不是主设计。
-
-如果 Native Session Controller 不存在，Connector 只从 Harness Workspace Registry 的官方 Workspace 对象读取 canonical path，并把这个官方 path 用作 headless CLI 的 cwd；不会重新引入用户维护的路径 map。
-
-如果任务带已有 Session ID，而 generic headless 无法安全恢复原 Harness Session，则明确失败。
-
-## beta.3 配置字段
+## 配置
 
     endpoint: https://deepseek-worker.sxfdgan.chatgpt.site/api/worker
     workerId: deepseek-worker-windows
@@ -216,77 +223,68 @@ Headless 仍是最后 fallback，不是主设计。
     headlessCommand: dsh
     headlessArgs: [--profile, headless, --json]
 
-所有非 Secret 字段继续通过 Harness Config / volatile 机制更新。
+Token 不属于 Config。
 
-## beta.2 → beta.3
+## 安装 / 升级
 
-建议升级步骤：
+推荐直接重新安装当前 main：
 
-1. 在 Harness 插件页禁用并卸载 beta.2。
-2. 重新从 Git URL 安装本仓库。
-3. 启用 Connector。
-4. 打开配置页。
-5. 确认 Token 是否显示“已配置”；如没有则重新设置。
-6. 在 Harness Workspaces 中重新勾选允许的 Workspace。
-7. 保持“受信任工作区模式”开启，除非你希望暂停本地任务领取。
-8. 保存配置。
-9. 点击“测试连接”。
+    https://github.com/aevyrian/deepseek-worker.git
 
-旧 beta.2 手工路径映射不会自动转换，因为 beta.3 的授权对象是 Harness 已存在的 WorkspaceId，而不是路径 alias。
+升级后：
+
+1. 打开插件配置页。
+2. 确认 Harness Workspace“项目”仍可见并勾选。
+3. 点击“生成随机 Token”。
+4. 保存 Token。
+5. 确认 Credential 显示“已配置”。
+6. 点击“测试连接”。
+7. 确认 Execution 是否显示 `Native Harness`。
+8. 再做真实本地任务与续作测试。
 
 ## 自动测试
 
-beta.3 自动测试覆盖 Remote lifecycle、status/generateToken/test、Workspace 列表与选择、失效 Workspace 清理、Token 不进入 Config、Cloud path 拒绝、Native WorkspaceId create、continue Workspace 一致性、401/403/Network/TLS 与原有 Worker protocol。
+0.2.1 在 GitHub Actions 的 **windows-latest / Node 22** 上执行：
 
-GitHub Actions 在 Node 22 上执行：
+- `node --check index.js`
+- `node --check client.js`
+- `node --check lib/connector-config.mjs`
+- `node --check lib/protocol.mjs`
+- `node --check lib/native-session.mjs`
+- `npm test`
 
-- node --check index.js
-- node --check client.js
-- node --check lib/connector-config.mjs
-- node --check lib/protocol.mjs
-- node --check lib/native-session.mjs
-- npm test
+结果：
 
-当前结果：
-
-    24 tests
-    24 pass
+    28 tests
+    28 pass
     0 fail
 
-## 仍需 Windows Desktop 真机验证
+新增覆盖包括：
 
-自动测试不能替代：
+- 真实 `index.js` / `WorkerControlService` Loader-root 注册；
+- 按 Harness Gateway 当前算法执行 Host source-mode discovery；
+- `deepseekWorkerConnector/status` 可发现并调用；
+- `deepseekWorkerConnector/generateToken` 可发现并调用；
+- `deepseekWorkerConnector/test` 可发现并调用；
+- Client Host Remote 错误分类；
+- Credentials describe/set 错误分类；
+- Credential 写入失败绝不回显 Token。
 
-- Git URL 安装 / 升级 beta.3。
-- 当前 Windows Desktop 是否加载新的 client.js。
-- 配置页是否实时列出真实 Harness Workspace。
-- “生成随机 Token”是否不再出现 Remote inject 错误。
-- “测试连接”是否不再出现 Remote inject 错误。
-- 当前 profile 是否识别为 Native Harness。
-- 真正的 register / heartbeat / claim。
-- 新任务是否在勾选 Workspace 创建 Session。
-- continue / rework 是否恢复原 Session。
-- 文件、Shell、Git、build、test 等权限是否按当前 Harness Profile 实际权限工作。
+其余 WorkspaceId、Native Session、continue/rework、Cloud path 拒绝、Secret 脱敏测试继续保留。
 
-## 结构
+## 真机仍需验证
 
-主要文件：
+自动测试之后仍需要 Windows DeepSeek Harness Desktop 实机确认：
 
-- index.js
-- client.js
-- lib/connector-config.mjs
-- lib/native-session.mjs
-- lib/protocol.mjs
-- tests/client.test.mjs
-- tests/config.test.mjs
-- tests/native-session.test.mjs
-- tests/protocol.test.mjs
-- dsh.bundle.patch.yml
-- CHANGELOG.md
-- docs/DESIGN.md
+- 安装/升级 0.2.1 后插件能正常启用；
+- Execution 从“未知”变为 `Native Harness`；
+- “生成随机 Token”能够真实返回一次性 Token；
+- 保存 Token 后 Credential 显示“已配置”；
+- 重开页面后无法读回 Token 明文；
+- “测试连接”能进入 Host `test()`，不再出现 Gateway service unavailable；
+- register / heartbeat / claim 真实链路；
+- 新任务在勾选的“项目”Workspace 创建 Session；
+- continue / rework 恢复同一 Session；
+- Trusted Workspace 下文件、Shell、Git、build、test 权限符合当前 Harness Profile。
 
-详细技术边界见 docs/DESIGN.md。
-
-## License
-
-当前仓库尚未添加开源许可证。
+详细实现见 `docs/DESIGN.md`。

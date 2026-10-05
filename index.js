@@ -43,12 +43,20 @@ function currentConfig(input) {
   return normalizeConfig(snapshotConnectorInput(input));
 }
 
-function currentSessionController(ctx) {
+function optionalService(ctx, key) {
   try {
-    return typeof ctx.get === "function" ? ctx.get("sessionController") : ctx.sessionController;
+    return typeof ctx.get === "function" ? ctx.get(key) : undefined;
   } catch {
     return undefined;
   }
+}
+
+function currentSessionController(ctx) {
+  return optionalService(ctx, "sessionController");
+}
+
+function currentCredentials(ctx) {
+  return optionalService(ctx, "credentials");
 }
 
 function initialRuntime() {
@@ -73,26 +81,50 @@ function workspaceState(config, registry) {
   };
 }
 
-class WorkerControlService extends TypertRemoteService {
-  constructor(ctx, input, runtime) {
+export class WorkerControlService extends TypertRemoteService {
+  static inject = ["workspaceRegistry"];
+  static Config = Config;
+
+  constructor(ctx, input = {}) {
     super(ctx, "deepseekWorkerConnectorControl", { namespace: "deepseekWorkerConnector" });
-    this.owner = ctx;
     this.input = input;
-    this.runtime = runtime;
+    this.runtime = initialRuntime();
+
+    ctx.effect(() => {
+      const lifecycle = new AbortController();
+      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal).catch((error) => {
+        if (!lifecycle.signal.aborted) {
+          ctx.logger.error("deepseek-worker connector stopped: %s", redactSecret(error));
+        }
+      });
+      return async () => {
+        lifecycle.abort(new Error("DeepSeek Worker Connector stopped"));
+        await worker;
+      };
+    }, "deepseek-worker-connector: worker loop");
   }
 
   async status() {
+    const credentials = currentCredentials(this.ctx);
     let credentialConfigured = false;
-    try {
-      credentialConfigured = Boolean(await this.owner.credentials.resolve(TOKEN_REF));
-    } catch {}
+    if (credentials !== undefined) {
+      try {
+        credentialConfigured = Boolean(await credentials.resolve(TOKEN_REF));
+      } catch {}
+    }
+
     try {
       const config = currentConfig(this.input);
-      const workspaces = workspaceState(config, this.owner.workspaceRegistry);
-      const controller = currentSessionController(this.owner);
+      const workspaces = workspaceState(config, this.ctx.workspaceRegistry);
+      const controller = currentSessionController(this.ctx);
       this.runtime.workerId = config.workerId;
       this.runtime.workspaceCount = workspaces.count;
       this.runtime.execution = executionMode(controller !== undefined);
+      if (credentials === undefined) {
+        this.runtime.credential = "unconfigured";
+        if (this.runtime.worker !== "error") this.runtime.worker = "paused";
+        this.runtime.lastError = "Harness Credential provider 不可用。";
+      }
       return publicRuntimeStatus(this.runtime, {
         credentialConfigured,
         workerId: config.workerId,
@@ -122,7 +154,7 @@ class WorkerControlService extends TypertRemoteService {
     if (config.authorizedWorkspaceIds.length === 0) {
       return { ok: false, code: "workspace_missing", message: "尚未授权任何 Harness Workspace。" };
     }
-    const workspaces = workspaceState(config, this.owner.workspaceRegistry);
+    const workspaces = workspaceState(config, this.ctx.workspaceRegistry);
     if (workspaces.missing.length > 0) {
       return {
         ok: false,
@@ -130,13 +162,24 @@ class WorkerControlService extends TypertRemoteService {
         message: `以下授权 Workspace 已不存在：${workspaces.missing.join(", ")}。请在配置页重新选择。`,
       };
     }
+
+    const credentials = currentCredentials(this.ctx);
+    if (credentials === undefined) {
+      return {
+        ok: false,
+        code: "credential_unavailable",
+        message: "Harness Credential provider 不可用，无法读取 LOCAL_WORKER_TOKEN。",
+      };
+    }
+
     let token;
     try {
-      token = await this.owner.credentials.resolve(TOKEN_REF);
+      token = await credentials.resolve(TOKEN_REF);
     } catch (error) {
       return { ok: false, code: "credential_error", message: `读取 Harness Credentials 失败：${redactSecret(error)}` };
     }
     if (!token) return { ok: false, code: "token_missing", message: "Worker Token 未配置。" };
+
     try {
       await workerRequest(config, token, "register", {
         hostname: hostname(),
@@ -147,7 +190,7 @@ class WorkerControlService extends TypertRemoteService {
       this.runtime.worker = config.trustedWorkspaceMode ? "online" : "paused";
       this.runtime.lastError = config.trustedWorkspaceMode
         ? null
-        : "当前为受限工作区模式；beta.3 不领取远程执行任务。";
+        : "当前为受限工作区模式；0.2.1 不领取远程执行任务。";
       this.runtime.workerId = config.workerId;
       this.runtime.workspaceCount = config.authorizedWorkspaceIds.length;
       return {
@@ -155,7 +198,7 @@ class WorkerControlService extends TypertRemoteService {
         code: "connected",
         message: config.trustedWorkspaceMode
           ? "连接成功。授权 Harness Workspace 已报告给 Cloud。"
-          : "连接成功；当前处于受限工作区模式，beta.3 不领取远程执行任务。",
+          : "连接成功；当前处于受限工作区模式，0.2.1 不领取远程执行任务。",
         workerId: config.workerId,
       };
     } catch (error) {
@@ -189,22 +232,7 @@ for (const method of ["status", "generateToken", "test"]) {
   markRemoteMethod(WorkerControlService.prototype, method);
 }
 
-export async function apply(ctx, input = {}) {
-  const lifecycle = new AbortController();
-  const runtime = initialRuntime();
-  ctx.effect(() => () => lifecycle.abort(new Error("DeepSeek Worker Connector stopped")));
-
-  await ctx.inject(["credentials", "workspaceRegistry"], async (scope) => {
-    new WorkerControlService(scope, input, runtime);
-    try {
-      await runWorker(scope, input, runtime, lifecycle.signal);
-    } catch (error) {
-      if (!lifecycle.signal.aborted) {
-        scope.logger.error("deepseek-worker connector stopped: %s", redactSecret(error));
-      }
-    }
-  });
-}
+export default WorkerControlService;
 
 async function runWorker(ctx, input, runtime, signal) {
   let registeredToken;
@@ -241,14 +269,24 @@ async function runWorker(ctx, input, runtime, signal) {
       }
       if (!config.trustedWorkspaceMode) {
         runtime.worker = "paused";
-        runtime.lastError = "当前为受限工作区模式；beta.3 不领取远程执行任务。";
+        runtime.lastError = "当前为受限工作区模式；0.2.1 不领取远程执行任务。";
         registeredSignature = "";
         registeredToken = undefined;
         await sleep(pollIntervalMs, signal);
         continue;
       }
 
-      token = await ctx.credentials.resolve(TOKEN_REF);
+      const credentials = currentCredentials(ctx);
+      if (credentials === undefined) {
+        runtime.credential = "unconfigured";
+        runtime.worker = "paused";
+        runtime.lastError = "Harness Credential provider 不可用。";
+        registeredSignature = "";
+        registeredToken = undefined;
+        await sleep(pollIntervalMs, signal);
+        continue;
+      }
+      token = await credentials.resolve(TOKEN_REF);
       if (!token) {
         runtime.credential = "unconfigured";
         runtime.worker = "paused";
