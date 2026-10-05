@@ -74,14 +74,14 @@ function githubFallback({ releases = [], tags = [] } = {}) {
 }
 
 function pluginManager({
-  source = `${TRUSTED_SOURCE}#v0.3.2`,
+  source = `${TRUSTED_SOURCE}#v0.4.7`,
   result = {
     changed: true,
     application: "restart-required",
     stage: "install",
     target: TRUSTED_SOURCE,
     bundle: CONNECTOR_PACKAGE,
-    version: "0.3.3",
+    version: "0.4.8",
   },
   onInstall,
 } = {}) {
