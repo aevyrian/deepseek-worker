@@ -1,0 +1,14 @@
+- insert:
+    - id: deepseek-worker-connector
+      name: deepseek-worker-connector
+      config:
+        endpoint: https://deepseek-worker.sxfdgan.chatgpt.site/api/worker
+        workerId: deepseek-worker-windows
+        pollIntervalMs: 4000
+        heartbeatIntervalMs: 20000
+        leaseRenewIntervalMs: 20000
+        leaseWaitTimeoutMs: 1800000
+        workspaceAllowlist: {}
+        enableHeadlessFallback: true
+        headlessCommand: dsh
+        headlessArgs: [--profile, headless, --json]

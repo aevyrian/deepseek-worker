@@ -1,0 +1,50 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import { buildTaskPrompt, extractAssistantText, normalizeConfig, workerRequest, workspaceForTask } from "../lib/protocol.mjs";
+
+test("requires HTTPS endpoint and fails closed without workspace allowlist entries", () => {
+  assert.throws(() => normalizeConfig({ endpoint: "http://example.test/api/worker" }), /HTTPS/);
+  const config = normalizeConfig({ workspaceAllowlist: {} });
+  assert.throws(() => workspaceForTask(config, { workspace_id: "repo-a" }), /allowlist/);
+});
+
+test("routes only a task whose exact workspace ID is configured", () => {
+  const config = normalizeConfig({ endpoint: "https://example.test/api/worker", workspaceAllowlist: { "repo-a": "E:/Projects/repo-a" } });
+  assert.deepEqual(workspaceForTask(config, { workspace_id: "repo-a" }), { workspaceId: "repo-a", cwd: "E:\\Projects\\repo-a" });
+  assert.throws(() => workspaceForTask(config, { workspace_id: "repo-b" }), /allowlist/);
+});
+
+test("builds the prompt from durable context and task text", () => {
+  assert.equal(buildTaskPrompt({ context: "Prior result", prompt: "Continue" }), "Saved task context:\nPrior result\n\nTask:\nContinue");
+});
+
+test("extracts assistant text from a completed Session event", () => {
+  assert.equal(extractAssistantText({ message: { content: [{ type: "text", text: "Done." }] } }), "Done.");
+});
+
+test("sends Bearer authorization only to the explicitly configured local test endpoint", async () => {
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ route: request.url, auth: request.headers.authorization, body: JSON.parse(body) }));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const address = server.address();
+    const config = { endpoint: `http://127.0.0.1:${address.port}/api/worker`, workerId: "test-worker" };
+    const token = "not-a-real-secret-local-test-only";
+    const result = await workerRequest(config, token, "claim", {}, new AbortController().signal);
+    assert.equal(result.route, "/api/worker/claim");
+    assert.equal(result.auth, `Bearer ${token}`);
+    assert.equal(result.body.worker_id, "test-worker");
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});
