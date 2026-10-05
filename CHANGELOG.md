@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.3-preview.1
+
+### Workspace discovery compatibility
+
+#### Added
+
+- Connector register/heartbeat now synchronizes the current effective authorized Harness Workspace set to Cloud.
+- Workspace advertisements contain only stable Workspace ID and an optional safe display title/name.
+- Heartbeat keeps the Cloud allowlist current after Workspace authorization changes or Workspace deletion.
+- Worker presence reports paused while authorization is empty, stale, or restricted, while still allowing Cloud to learn the safe empty/reduced Workspace set.
+
+#### Security
+
+- Workspace advertisements never serialize Harness cwd, local path, workspace path, Credentials, Worker Token, or arbitrary Workspace objects.
+- Path-looking display titles are omitted instead of risking local path disclosure.
+- Existing local `workspaceForTask()` authorization and Registry existence checks remain mandatory before Harness execution.
+
+#### Compatibility
+
+- Pairing architecture, Credential storage, Native Session architecture, and updater architecture are unchanged.
+- This preview is intended for the first real `0.3.2 -> 0.3.3-preview.1` self-update E2E after the matching Cloud workspace-discovery update is deployed.
+
+#### Validation
+
+- Added permanent Workspace advertisement tests for multiple/empty Workspaces, add/remove synchronization, and path/secret non-disclosure.
+- Existing updater and Workspace security tests remain in the Windows / Node 22 workflow.
+
 ## 0.3.2
 
 ### Self Update

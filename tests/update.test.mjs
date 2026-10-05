@@ -362,7 +362,7 @@ test("Plugin Manager update failure keeps the current Connector runtime usable",
     harnessVersion: "1.0.0",
     fetchImpl: cloudOnly(manifest("0.3.3")),
   });
-  assert.equal(status.currentVersion, "0.3.2");
+  assert.equal(status.currentVersion, CONNECTOR_VERSION);
   assert.equal(status.restartRequired, false);
   assert.equal(status.updateState, "failed");
   assert.match(status.lastUpdateError, /当前 Connector 继续运行/);
@@ -385,7 +385,7 @@ test("bundle validation failure leaves the running Connector on the current vers
     harnessVersion: "1.0.0",
     fetchImpl: cloudOnly(manifest("0.3.3")),
   });
-  assert.equal(status.currentVersion, "0.3.2");
+  assert.equal(status.currentVersion, CONNECTOR_VERSION);
   assert.equal(status.restartRequired, false);
   assert.equal(status.updateState, "failed");
 });
@@ -409,7 +409,7 @@ test("official incompatibility result is surfaced without replacing runtime stat
   });
   assert.equal(status.updateState, "failed");
   assert.match(status.lastUpdateError, /不兼容/);
-  assert.equal(status.currentVersion, "0.3.2");
+  assert.equal(status.currentVersion, CONNECTOR_VERSION);
 });
 
 test("auto-update disabled performs no network or package operation", async () => {

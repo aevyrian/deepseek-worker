@@ -112,3 +112,38 @@ test("sends Bearer authorization and the native WorkspaceId allowlist payload un
     await once(server, "close");
   }
 });
+
+
+test("heartbeat carries only explicit Workspace identity metadata", async () => {
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      response.setHeader("content-type", "application/json");
+      response.end(body);
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const address = server.address();
+    const config = {
+      endpoint: `http://127.0.0.1:${address.port}/api/worker`,
+      workerId: "test-worker",
+    };
+    const result = await workerRequest(config, "local-test-token", "heartbeat", {
+      state: "online",
+      workspace_allowlist: ["workspace-a"],
+      workspaces: [{ id: "workspace-a", name: "Project A" }],
+      client_version: "0.3.3-preview.1",
+    }, new AbortController().signal);
+    assert.deepEqual(result.workspaces, [{ id: "workspace-a", name: "Project A" }]);
+    assert.deepEqual(result.workspace_allowlist, ["workspace-a"]);
+    assert.equal(Object.hasOwn(result, "path"), false);
+    assert.equal(Object.hasOwn(result, "cwd"), false);
+    assert.equal(Object.hasOwn(result, "token"), false);
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});

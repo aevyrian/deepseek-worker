@@ -107,7 +107,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
     assert.equal(init.headers.authorization, undefined);
     assert.match(body.token_hash, /^[0-9a-f]{64}$/);
-    assert.equal(body.client_version, "0.3.2");
+    assert.equal(body.client_version, "0.3.3-preview.1");
     assert.deepEqual(body.workspace_allowlist, ["workspace-a"]);
     return new Response(JSON.stringify({
       state: "pending",
@@ -172,7 +172,7 @@ try {
 
   const status = await gatewayInvoke(ctx, "deepseekWorkerConnector", "status");
   assert.equal(status.execution, "native");
-  assert.equal(status.currentVersion, "0.3.2");
+  assert.equal(status.currentVersion, "0.3.3-preview.1");
   assert.equal(status.updateState, "idle");
 
   const generated = await gatewayInvoke(ctx, "deepseekWorkerConnector", "generateToken");
