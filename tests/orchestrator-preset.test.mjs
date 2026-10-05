@@ -79,4 +79,9 @@ test("connector bundle ships the orchestrator preset and Standard capability mar
   ]) {
     assert.equal(patch.includes(expected), true, "missing preset marker: " + expected);
   }
+  assert.equal(
+    patch.includes("id: tool-schedule"),
+    false,
+    "orchestrator preset must not hard-depend on the optional schedule tool",
+  );
 });
