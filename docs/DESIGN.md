@@ -1,8 +1,8 @@
-# DeepSeek Worker Connector 0.3.1 设计
+# DeepSeek Worker Connector 0.3.2 设计
 
 ## 1. 本轮边界
 
-0.3.1 是 Connector patch release。Cloud Site、D1、MCP、`/api/worker/*` 与现有 Cloud pairing protocol 不在修改范围。
+0.3.2 在 0.3.1 pairing/UI 基线上增加 Connector 自更新。Cloud Site、D1、MCP、`/api/worker/*` 与现有 Cloud pairing protocol 不在修改范围。
 
 保留 0.3.0 的 WorkspaceId 与 per-worker pairing 方向，本轮修正 Host Credentials 真实契约、Remote failure boundary 与普通用户 UI。
 
@@ -130,9 +130,9 @@ Secret 不进入 Browser。
 - continue/rework 的 Session membership + cwd 校验
 - Cloud local-path field rejection
 
-## 11. 自动验证
+## 11. Pairing 基线自动验证
 
-Windows `windows-latest` / Node 22：
+自更新开发前的 0.3.1 pairing/UI 基线在 Windows `windows-latest` / Node 22 为：
 
     44 tests
     44 pass
@@ -153,3 +153,39 @@ Host probe 不是 mock 一个已经存在的 Client namespace；它加载真实 
 Credentials mock 使用官方 `{ value, source }` shape。
 
 Browser tests 覆盖 3 秒 polling、reopen、setup URL、Token 不进 URL/持久存储、普通 UI 与高级兼容入口。
+
+
+## 12. 0.3.2 Self Update
+
+自更新与 Worker/Pairing 解耦。UpdateProvider 只产生经过验证的 version/channel/source/ref metadata，不产生或执行命令。
+
+Host 使用当前 Profile 的 ctx.pluginManager。现有 bundle source 必须由 listBundles() 证明属于受信任 GitHub 仓库。更新 spec 由 Connector 从固定 source + 已验证 exact ref 构造，不直接执行远端任意字符串。
+
+正式 tag 会先解析为 commit SHA；随后读取该 commit 的 package.json 核验 package identity/version/bundle metadata。只有这些检查通过，才允许调用 installBundle()。
+
+Worker runtime 用 workerBusy 覆盖 claim 到 result/failure/lease cleanup 的完整区间。更新状态进入 waiting-idle 后 runWorker 不再开始新 claim；已有任务不被中止。
+
+Plugin Manager 对已安装 package replacement 返回 restart-required，所以新的 package 文件落盘后，当前旧 generation 继续运行到 Harness 重启。没有使用动态 import 新 bundle、强制 kill 或私有 Electron relaunch。
+
+UpdateProvider 预留固定 Cloud endpoint /api/connector/latest；本版本不实现 Cloud 端，只在 endpoint 不可用时 fallback GitHub。
+
+## 13. Self Update 最终验证
+
+正式 `.github/workflows/test.yml` 在 Windows `windows-latest` / Node 22 上执行：
+
+    node --check index.js
+    node --check client.js
+    node --check lib/connector-config.mjs
+    node --check lib/protocol.mjs
+    node --check lib/native-session.mjs
+    node --check lib/pairing.mjs
+    node --check lib/update.mjs
+    npm test
+
+最终 suite：
+
+    75 tests
+    75 pass
+    0 fail
+
+临时 `v031-self-update-validation` workflow 不进入 main；Windows 自更新验证已并入项目长期 `test` workflow。

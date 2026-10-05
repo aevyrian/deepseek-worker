@@ -1,8 +1,65 @@
 # Changelog
 
+## 0.3.2
+
+### Self Update
+
+#### Added
+
+- 正式发布 Harness Connector 自更新：默认检查 stable 更新，并在 Worker 完全空闲后安装。
+- 通过 Harness 官方 Plugin Manager 替换 Connector package，成功后要求重启 Harness。
+- 只接受受信任 GitHub 仓库中的版本 tag，并在安装前解析为不可变 commit SHA、验证 package 元数据。
+
+#### Preserved
+
+- Credentials、Workspace 授权、设备配对身份、Native Session 与 continue/rework 状态。
+- Cloud、D1、MCP 与现有 pairing protocol。
+
+#### Validation
+
+- Windows GitHub Actions / Node 22 workflow 通过；更新器、Host Remote、配对、Workspace 与 Session 覆盖纳入永久测试流程。
+- JavaScript syntax checks 与 `npm test` 在 PR CI 中通过。
+
 ## 0.3.1
 
-### Fixed
+### Self Update
+
+#### Added
+
+- 启动后自动检查正式更新；默认 autoUpdate=true、updateChannel=stable。
+- 独立 UpdateProvider：Cloud manifest 优先，固定 GitHub Releases/Tags fallback。
+- 正确 SemVer 比较、stable/preview 通道、同版本/降级/非法版本拒绝。
+- trusted source allowlist，只允许 aevyrian/deepseek-worker。
+- 正式 Git tag 先解析成 exact commit SHA，并预验 package name/version/bundle metadata。
+- Worker busy fence：Task 进行中进入 waiting-idle，Task 完成后才安装。
+- 非敏感更新状态：currentVersion/latestVersion/updateState/lastCheckedAt/restartRequired/lastUpdateError。
+- 普通 UI 增加版本、自动更新、channel、状态和失败重试。
+
+#### Harness integration
+
+- 自更新只调用官方 ctx.pluginManager.listBundles() 与 ctx.pluginManager.installBundle(spec, { enabled: false })。
+- 已安装 package replacement 成功必须得到 Harness restart-required，不热加载新 Host JS。
+- Plugin Manager 的 package transaction/validation failure 使用 Harness 自己的 profile manifest/lock rollback。
+- 当前未发现面向第三方插件的通用 Desktop restart/relaunch API，因此只提示用户重启。
+
+#### Preserved
+
+- Credentials / LOCAL_WORKER_TOKEN。
+- authorizedWorkspaceIds / trustedWorkspaceMode / endpoint / workerId。
+- pairing identity 与 Cloud pairing protocol。
+- Native Session / continue / rework。
+- Cloud Site / D1 / MCP / /api/worker/* 均未修改。
+
+#### Validation
+
+- 正式 Windows GitHub Actions / Node 22 workflow 通过。
+- JavaScript / MJS syntax checks 全通过，包含 `lib/update.mjs`。
+- `npm test`：**75/75 pass，0 fail**。
+- 覆盖 SemVer、stable/preview、可信 source、tag→commit、package metadata、busy fence、Plugin Manager failure/compatibility 与 Remote/UI 状态。
+
+### Pairing / UI fixes
+
+#### Fixed
 
 - 修复 Windows DeepSeek Harness Desktop 中 `beginPairing()` 可能被 Gateway 折叠为 `gateway/internal` 的 Host 路径。
 - pairing Host methods 全部按 Harness 当前 Credentials API 处理 `resolve(ref) -> { value, source } | undefined`。
@@ -10,7 +67,7 @@
 - `pairingStatus` 与 `disconnectPairing` 使用同一严格 Credential 解包逻辑。
 - 修复本轮测试中发现的 Credential helper 递归缺陷。
 
-### Changed
+#### Changed
 
 - 普通 UI 改为“设备连接”优先，不再首先展示 Token / Endpoint / Worker ID。
 - 默认按钮为“安装并连接 ChatGPT”。
@@ -20,7 +77,7 @@
 - 页面 reopen 时，如果 Credential 已配置，会自动调用 `pairingStatus()` 恢复状态。
 - pending 每约 3 秒 polling，paired/expired/revoked/error 自动停止。
 
-### Security
+#### Security
 
 - 自动配对 Token 由 Host 生成并先写入 Harness Credentials。
 - `pair/start` 只发送 SHA-256 `token_hash`，不发送原始 Token，也不带该 Token 的 Bearer。
@@ -29,12 +86,12 @@
 - approval URL 只接受无 username/password 的 HTTPS URL。
 - Connector 不猜 ChatGPT Plugin Directory URL；优先消费 Cloud 返回的 `approvalUrl`，兼容使用 Cloud `/setup` 入口。
 
-### Preserved
+#### Preserved
 
 - Cloud Site / D1 / MCP / `/api/worker/*` / Cloud pairing protocol 未修改。
 - Harness WorkspaceId、`authorizedWorkspaceIds`、`trustedWorkspaceMode`、Native Session、continue/rework、Cloud path 拒绝全部保留。
 
-### Validation
+#### Validation
 
 Windows GitHub Actions / Node 22：
 

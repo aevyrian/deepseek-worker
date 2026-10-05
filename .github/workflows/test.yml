@@ -22,5 +22,6 @@ jobs:
           node --check lib/protocol.mjs
           node --check lib/native-session.mjs
           node --check lib/pairing.mjs
+          node --check lib/update.mjs
       - name: Unit tests
         run: npm test

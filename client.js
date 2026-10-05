@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
 
     const contribution = {
       package: "deepseek-worker-connector",
-      descriptors: ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"].map((method) => ({
+      descriptors: ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"].map((method) => ({
         id: `deepseek-worker-connector#deepseekWorkerConnector/${method}`,
         service: "deepseekWorkerConnectorControl",
         namespace: "deepseekWorkerConnector",
@@ -87,6 +87,25 @@ window.__ModuleLoader__.load({
       test: "测试连接",
       testing: "测试中…",
       workspaceRequired: "请先选择至少一个 Harness Workspace。",
+      version: "版本",
+      autoUpdate: "自动更新",
+      updateChannel: "更新通道",
+      updateStatus: "更新状态",
+      enabled: "开启",
+      disabled: "关闭",
+      stable: "stable",
+      preview: "preview",
+      updateIdle: "等待自动检查",
+      updateChecking: "正在检查更新",
+      updateCurrent: "已是最新版本",
+      updateAvailable: "发现新版本",
+      updateWaitingIdle: "等待当前任务完成",
+      updateInstalling: "正在安装更新",
+      updateRestart: "更新已安装，重启 Harness 后生效",
+      updateFailed: "自动更新失败。当前版本仍可继续使用。",
+      retryUpdate: "重试",
+      latestVersion: "最新版本",
+      lastChecked: "上次检查",
     };
 
     const en = {
@@ -122,6 +141,25 @@ window.__ModuleLoader__.load({
       tokenHint: "For legacy Cloud, development, diagnostics, or recovery only.",
       pairingCode: "Pairing code",
       workspaceRequired: "Select at least one Harness Workspace first.",
+      version: "Version",
+      autoUpdate: "Automatic updates",
+      updateChannel: "Update channel",
+      updateStatus: "Update status",
+      enabled: "On",
+      disabled: "Off",
+      stable: "stable",
+      preview: "preview",
+      updateIdle: "Waiting for automatic check",
+      updateChecking: "Checking for updates",
+      updateCurrent: "Up to date",
+      updateAvailable: "Update available",
+      updateWaitingIdle: "Waiting for current task to finish",
+      updateInstalling: "Installing update",
+      updateRestart: "Update installed. Restart Harness to apply it.",
+      updateFailed: "Automatic update failed. The current version can keep running.",
+      retryUpdate: "Retry",
+      latestVersion: "Latest version",
+      lastChecked: "Last checked",
     };
 
     const sectionStyle = {
@@ -248,10 +286,10 @@ window.__ModuleLoader__.load({
     }
 
     function stateDot(value) {
-      if (["loaded", "configured", "online", "native", "paired"].includes(value)) return "done";
-      if (["detecting", "connecting", "pending"].includes(value)) return "ongoing";
+      if (["loaded", "configured", "online", "native", "paired", "up-to-date", "restart-required"].includes(value)) return "done";
+      if (["detecting", "connecting", "pending", "checking", "available", "waiting-idle", "installing"].includes(value)) return "ongoing";
       if (["paused", "headless", "untested", "unknown", "unpaired"].includes(value)) return "warning";
-      if (["offline", "unauthenticated", "unconfigured", "error", "expired", "revoked"].includes(value)) return "error";
+      if (["offline", "unauthenticated", "unconfigured", "error", "expired", "revoked", "failed"].includes(value)) return "error";
       return "idle";
     }
 
@@ -278,6 +316,8 @@ window.__ModuleLoader__.load({
         leaseWaitTimeoutMs: String(initial.leaseWaitTimeoutMs ?? 1800000),
         trustedWorkspaceMode: initial.trustedWorkspaceMode !== false,
         enableHeadlessFallback: initial.enableHeadlessFallback !== false,
+        autoUpdate: initial.autoUpdate !== false,
+        updateChannel: initial.updateChannel === "preview" ? "preview" : "stable",
       }));
       const [authorizedWorkspaceIds, setAuthorizedWorkspaceIds] = useState(() => (
         Array.isArray(initial.authorizedWorkspaceIds) ? [...new Set(initial.authorizedWorkspaceIds.map(String))] : []
@@ -317,6 +357,8 @@ window.__ModuleLoader__.load({
           leaseWaitTimeoutMs: String(value.leaseWaitTimeoutMs ?? 1800000),
           trustedWorkspaceMode: value.trustedWorkspaceMode !== false,
           enableHeadlessFallback: value.enableHeadlessFallback !== false,
+          autoUpdate: value.autoUpdate !== false,
+          updateChannel: value.updateChannel === "preview" ? "preview" : "stable",
         });
         setAuthorizedWorkspaceIds(Array.isArray(value.authorizedWorkspaceIds)
           ? [...new Set(value.authorizedWorkspaceIds.map(String))] : []);
@@ -397,6 +439,8 @@ window.__ModuleLoader__.load({
           ["authorizedWorkspaceIds", [...authorizedWorkspaceIds]],
           ["trustedWorkspaceMode", draft.trustedWorkspaceMode],
           ["enableHeadlessFallback", draft.enableHeadlessFallback],
+          ["autoUpdate", draft.autoUpdate],
+          ["updateChannel", draft.updateChannel],
         ].map(([field, value]) => ({ op: "set", path: [field], value }));
 
         setSaving(true);
@@ -410,6 +454,39 @@ window.__ModuleLoader__.load({
           return false;
         } finally {
           setSaving(false);
+        }
+      };
+
+      const saveUpdateSettings = async (autoUpdate, updateChannel) => {
+        const channel = updateChannel === "preview" ? "preview" : "stable";
+        try {
+          const ok = await form.mutate([
+            { op: "set", path: ["autoUpdate"], value: autoUpdate },
+            { op: "set", path: ["updateChannel"], value: channel },
+          ], form.state.revision);
+          if (!ok) {
+            setStatusMessage(t("saveFailed"));
+            return false;
+          }
+          setDraft((value) => ({ ...value, autoUpdate, updateChannel: channel }));
+          setStatusMessage("");
+          if (autoUpdate) {
+            await actions.checkForUpdates();
+            await refreshStatus();
+          }
+          return true;
+        } catch {
+          setStatusMessage(t("saveFailed"));
+          return false;
+        }
+      };
+
+      const retryUpdate = async () => {
+        try {
+          await actions.checkForUpdates();
+          await refreshStatus();
+        } catch (error) {
+          setStatusMessage(error instanceof Error ? error.message : t("updateFailed"));
         }
       };
 
@@ -556,6 +633,15 @@ window.__ModuleLoader__.load({
         : executionValue === "headless" ? t("headless")
           : executionValue === "detecting" ? t("detecting") : t("unknown");
 
+      const updateState = status?.updateState || "idle";
+      const updateDisplay = updateState === "checking" ? t("updateChecking")
+        : updateState === "up-to-date" ? t("updateCurrent")
+          : updateState === "available" ? t("updateAvailable")
+            : updateState === "waiting-idle" ? t("updateWaitingIdle")
+              : updateState === "installing" ? t("updateInstalling")
+                : updateState === "restart-required" ? t("updateRestart")
+                  : updateState === "failed" ? t("updateFailed") : t("updateIdle");
+
       const rawPairingState = pairing?.state || status?.pairing || "unpaired";
       const connectionState = pairingBusy
         ? "connecting"
@@ -658,6 +744,47 @@ window.__ModuleLoader__.load({
           workspaceMessage ? h("p", { role: "status", style: mutedStyle }, workspaceMessage) : null,
         ),
 
+        h("section", { style: sectionStyle },
+          h("h3", { style: { margin: 0 } }, t("version")),
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("span", null, t("version")),
+            h("strong", null, status?.currentVersion || "0.3.2"),
+          ),
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("span", null, t("autoUpdate")),
+            h("span", { style: rowStyle },
+              h(Switch, {
+                checked: draft.autoUpdate,
+                label: t("autoUpdate"),
+                onChange: (next) => { void saveUpdateSettings(next, draft.updateChannel); },
+              }),
+              h("span", null, draft.autoUpdate ? t("enabled") : t("disabled")),
+            ),
+          ),
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("label", { htmlFor: "deepseek-worker-update-channel" }, t("updateChannel")),
+            h("select", {
+              id: "deepseek-worker-update-channel",
+              value: draft.updateChannel,
+              onChange: (event) => { void saveUpdateSettings(draft.autoUpdate, event.target.value); },
+              style: { minWidth: 120, padding: "6px 8px", borderRadius: 8 },
+            },
+              h("option", { value: "stable" }, t("stable")),
+              h("option", { value: "preview" }, t("preview")),
+            ),
+          ),
+          h(StatusLine, { label: t("updateStatus"), value: updateState, display: updateDisplay }),
+          status?.restartRequired
+            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.3.2"} · ${t("updateRestart")}`)
+            : null,
+          updateState === "failed"
+            ? h("div", { style: gridStyle },
+                h("p", { style: mutedStyle }, t("updateFailed")),
+                h(Button, { variant: "outline", onClick: () => void retryUpdate() }, t("retryUpdate")),
+              )
+            : null,
+        ),
+
         h("details", { style: sectionStyle },
           h("summary", { style: { cursor: "pointer", fontWeight: 600 } }, t("advanced")),
           h("div", { style: { ...gridStyle, marginTop: 12 } },
@@ -722,6 +849,15 @@ window.__ModuleLoader__.load({
               display: credential?.configured ? t("configured") : t("unconfigured"),
             }),
             h(StatusLine, { label: t("worker"), value: status?.worker || "paused", display: status?.worker || "paused" }),
+            h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+              h("span", null, t("latestVersion")),
+              h("span", null, status?.latestVersion || status?.currentVersion || "0.3.2"),
+            ),
+            h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+              h("span", null, t("lastChecked")),
+              h("span", null, status?.lastCheckedAt || "--"),
+            ),
+            status?.lastUpdateError ? h("p", { style: mutedStyle }, status.lastUpdateError) : null,
 
             h("div", { style: rowStyle },
               h(Field, { label: t("poll") }, h(Input, {
@@ -804,6 +940,11 @@ window.__ModuleLoader__.load({
           const response = await ctx.remote.deepseekWorkerConnector.generateToken();
           if (!response.ok) throw new Error(hostRemoteFailure(response.error, "generateToken"));
           return response.value.token;
+        },
+        async checkForUpdates() {
+          const response = await ctx.remote.deepseekWorkerConnector.checkForUpdates();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "checkForUpdates"));
+          return response.value;
         },
         async describeCredential() {
           const response = await ctx.remote.credentials.describe([TOKEN_REF]);

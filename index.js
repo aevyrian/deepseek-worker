@@ -2,6 +2,7 @@ import { hostname } from "node:os";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import Schema from "@deepseek-ai/schemastery";
+import { getDshRuntimeVersion } from "@deepseek-ai/dsh-app-boot";
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import {
   DEFAULT_ENDPOINT,
@@ -31,6 +32,12 @@ import {
   normalizePairingState,
   pairingRequest,
 } from "./lib/pairing.mjs";
+import {
+  AutoUpdateController,
+  CONNECTOR_VERSION,
+  createUpdateRuntime,
+  publicUpdateStatus,
+} from "./lib/update.mjs";
 
 export const name = "deepseek-worker-connector";
 
@@ -44,6 +51,8 @@ export const Config = Schema.object({
   authorizedWorkspaceIds: Schema.array(Schema.string().pattern(/\S/u)).default([]).volatile(),
   trustedWorkspaceMode: Schema.boolean().default(true).volatile(),
   enableHeadlessFallback: Schema.boolean().default(true).volatile(),
+  autoUpdate: Schema.boolean().default(true).volatile(),
+  updateChannel: Schema.union([Schema.const("stable"), Schema.const("preview")]).default("stable").volatile(),
   headlessCommand: Schema.string().pattern(/\S/u).default("dsh").volatile(),
   headlessArgs: Schema.array(Schema.string()).default(["--profile", "headless", "--json"]).volatile(),
 });
@@ -66,6 +75,10 @@ function currentSessionController(ctx) {
 
 function currentCredentials(ctx) {
   return optionalService(ctx, "credentials");
+}
+
+function currentPluginManager(ctx) {
+  return optionalService(ctx, "pluginManager");
 }
 
 async function describeWorkerCredential(credentials) {
@@ -98,6 +111,8 @@ function initialRuntime() {
     pairingCode: null,
     approvalUrl: null,
     pairingExpiresAt: null,
+    ...createUpdateRuntime(CONNECTOR_VERSION),
+    workerBusy: false,
     lastError: null,
   };
 }
@@ -118,6 +133,16 @@ export class WorkerControlService extends TypertRemoteService {
     super(ctx, "deepseekWorkerConnectorControl", { namespace: "deepseekWorkerConnector" });
     this.input = input;
     this.runtime = initialRuntime();
+    this.updater = new AutoUpdateController({
+      runtime: this.runtime,
+      getConfig: () => currentConfig(this.input),
+      getPluginManager: () => currentPluginManager(this.ctx),
+      getHarnessVersion: () => {
+        try { return getDshRuntimeVersion(); } catch { return ""; }
+      },
+      isWorkerBusy: () => this.runtime.workerBusy === true,
+      logger: ctx.logger,
+    });
 
     ctx.effect(() => {
       const lifecycle = new AbortController();
@@ -131,6 +156,21 @@ export class WorkerControlService extends TypertRemoteService {
         await worker;
       };
     }, "deepseek-worker-connector: worker loop");
+
+    ctx.effect(() => {
+      const lifecycle = new AbortController();
+      const updater = this.updater.runScheduler(lifecycle.signal).catch((error) => {
+        if (!lifecycle.signal.aborted) {
+          this.runtime.updateState = "failed";
+          this.runtime.lastUpdateError = "自动更新失败。当前版本仍可继续使用。";
+          ctx.logger.warn("deepseek-worker update scheduler stopped: %s", redactSecret(error));
+        }
+      });
+      return async () => {
+        lifecycle.abort(new Error("DeepSeek Worker Connector stopped"));
+        await updater;
+      };
+    }, "deepseek-worker-connector: update scheduler");
   }
 
   async status() {
@@ -260,7 +300,7 @@ export class WorkerControlService extends TypertRemoteService {
         token_hash: hashWorkerToken(token),
         hostname: hostname(),
         workspace_allowlist: config.authorizedWorkspaceIds,
-        client_version: "0.3.1",
+        client_version: "0.3.2",
       }, AbortSignal.timeout(10000));
 
       const state = normalizePairingState(started.state || "pending");
@@ -450,6 +490,11 @@ export class WorkerControlService extends TypertRemoteService {
     return { token: generateWorkerToken(), ref: TOKEN_REF };
   }
 
+  checkForUpdates() {
+    void this.updater.requestCheck({ force: true });
+    return publicUpdateStatus(this.runtime);
+  }
+
   async test() {
     let config;
     try {
@@ -497,7 +542,7 @@ export class WorkerControlService extends TypertRemoteService {
       this.runtime.pairing = "paired";
       this.runtime.lastError = config.trustedWorkspaceMode
         ? null
-        : "当前为受限工作区模式；0.3.1 不领取远程执行任务。";
+        : "当前为受限工作区模式；0.3.2 不领取远程执行任务。";
       this.runtime.workerId = config.workerId;
       this.runtime.workspaceCount = config.authorizedWorkspaceIds.length;
       return {
@@ -505,7 +550,7 @@ export class WorkerControlService extends TypertRemoteService {
         code: "connected",
         message: config.trustedWorkspaceMode
           ? "连接成功。授权 Harness Workspace 已报告给 Cloud。"
-          : "连接成功；当前处于受限工作区模式，0.3.1 不领取远程执行任务。",
+          : "连接成功；当前处于受限工作区模式，0.3.2 不领取远程执行任务。",
         workerId: config.workerId,
       };
     } catch (error) {
@@ -535,7 +580,7 @@ function markRemoteMethod(prototype, methodName) {
   for (const initializer of initializers) initializer.call(receiver);
 }
 
-for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"]) {
+for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"]) {
   markRemoteMethod(WorkerControlService.prototype, method);
 }
 
@@ -576,7 +621,7 @@ async function runWorker(ctx, input, runtime, signal) {
       }
       if (!config.trustedWorkspaceMode) {
         runtime.worker = "paused";
-        runtime.lastError = "当前为受限工作区模式；0.3.1 不领取远程执行任务。";
+        runtime.lastError = "当前为受限工作区模式；0.3.2 不领取远程执行任务。";
         registeredSignature = "";
         registeredToken = undefined;
         await sleep(pollIntervalMs, signal);
@@ -633,8 +678,19 @@ async function runWorker(ctx, input, runtime, signal) {
         runtime.lastError = null;
       }
 
-      const claim = await workerRequest(config, token, "claim", {}, signal);
-      if (claim?.task) await processLease(ctx, config, token, claim.task, signal);
+      if (["waiting-idle", "installing"].includes(runtime.updateState)) {
+        runtime.worker = "paused";
+        await sleep(pollIntervalMs, signal);
+        continue;
+      }
+
+      runtime.workerBusy = true;
+      try {
+        const claim = await workerRequest(config, token, "claim", {}, signal);
+        if (claim?.task) await processLease(ctx, config, token, claim.task, signal);
+      } finally {
+        runtime.workerBusy = false;
+      }
     } catch (error) {
       if (signal.aborted) break;
       const mapped = classifyConnectionError(error);

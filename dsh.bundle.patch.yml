@@ -11,5 +11,7 @@
         authorizedWorkspaceIds: []
         trustedWorkspaceMode: true
         enableHeadlessFallback: true
+        autoUpdate: true
+        updateChannel: stable
         headlessCommand: dsh
         headlessArgs: [--profile, headless, --json]

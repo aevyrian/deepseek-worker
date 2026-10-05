@@ -15,6 +15,17 @@ test("requires HTTPS and defaults to an empty native Workspace authorization lis
   const config = normalizeConfig({});
   assert.deepEqual(config.authorizedWorkspaceIds, []);
   assert.equal(config.trustedWorkspaceMode, true);
+  assert.equal(config.autoUpdate, true);
+  assert.equal(config.updateChannel, "stable");
+});
+
+test("normalizes update channel without changing Workspace semantics", () => {
+  const preview = normalizeConfig({ updateChannel: "preview", autoUpdate: false });
+  assert.equal(preview.updateChannel, "preview");
+  assert.equal(preview.autoUpdate, false);
+  assert.deepEqual(preview.authorizedWorkspaceIds, []);
+  const invalid = normalizeConfig({ updateChannel: "nightly" });
+  assert.equal(invalid.updateChannel, "stable");
 });
 
 test("accepts only an exact authorized Harness WorkspaceId", () => {

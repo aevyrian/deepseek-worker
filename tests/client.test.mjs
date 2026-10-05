@@ -49,6 +49,17 @@ function goodRemoteNamespace() {
     },
     async pairingStatus() { return { ok: true, value: { ok: true, state: "pending" } }; },
     async disconnectPairing() { return { ok: true, value: { ok: true, state: "unpaired" } }; },
+    async checkForUpdates() {
+      return {
+        ok: true,
+        value: {
+          currentVersion: "0.3.2",
+          latestVersion: "0.3.2",
+          updateState: "up-to-date",
+          restartRequired: false,
+        },
+      };
+    },
   };
 }
 
@@ -102,7 +113,7 @@ async function mountClient({
         assert.equal(contribution.package, "deepseek-worker-connector");
         assert.deepEqual(
           Array.from(contribution.descriptors, (descriptor) => descriptor.method),
-          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"],
+          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"],
         );
         mounted = true;
         return async () => { remoteDisposed = true; mounted = false; };
@@ -147,6 +158,7 @@ test("Client mounts all Connector Remotes and keeps manual Token compatibility",
   assert.equal((await mounted.actions.beginPairing()).state, "pending");
   assert.equal((await mounted.actions.pairingStatus()).state, "pending");
   assert.equal((await mounted.actions.disconnectPairing()).state, "unpaired");
+  assert.equal((await mounted.actions.checkForUpdates()).updateState, "up-to-date");
   assert.equal((await mounted.actions.describeCredential()).configured, true);
   assert.equal(await mounted.actions.storeCredential("manual-compatibility-token"), true);
   assert.equal(mounted.actions.getWorkspacesSnapshot().items[0].workspaceId, "workspace-a");
@@ -161,7 +173,7 @@ test("Client mounts all Connector Remotes and keeps manual Token compatibility",
 test("Host Remote failures remain actionable for pairing methods", async () => {
   const leaked = "do-not-display-this-server-text";
   const failing = {};
-  for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"]) {
+  for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"]) {
     failing[method] = async () => ({
       ok: false,
       error: { code: "gateway/service-unavailable", message: leaked },
@@ -176,6 +188,7 @@ test("Host Remote failures remain actionable for pairing methods", async () => {
     ["beginPairing", () => mounted.actions.beginPairing()],
     ["pairingStatus", () => mounted.actions.pairingStatus()],
     ["disconnectPairing", () => mounted.actions.disconnectPairing()],
+    ["checkForUpdates", () => mounted.actions.checkForUpdates()],
   ]) {
     const error = await invoke().catch((value) => value);
     assert.match(error.message, new RegExp(`Host Remote 不可用.*${name}`));
@@ -347,4 +360,23 @@ test("Browser persistence contains WorkspaceIds, not a local path editor", async
   assert.match(source, /ctx\.workspaces\.list\.getSnapshot/);
   assert.doesNotMatch(source, /workspaceAllowlist/);
   assert.doesNotMatch(source, /localPath/);
+});
+
+test("normal UI exposes simple automatic update status while package details stay hidden", async () => {
+  const { source } = await loadClientPlugin();
+  assert.match(source, /自动更新/);
+  assert.match(source, /更新状态/);
+  assert.match(source, /已是最新版本/);
+  assert.match(source, /重启 Harness 后生效/);
+  assert.match(source, /stable/);
+  assert.match(source, /preview/);
+  assert.doesNotMatch(source, /pnpm add/);
+  assert.doesNotMatch(source, /node_modules/);
+});
+
+test("Browser update controls never receive Credential values or package-manager commands", async () => {
+  const { source } = await loadClientPlugin();
+  assert.match(source, /checkForUpdates/);
+  assert.doesNotMatch(source, /installBundle/);
+  assert.doesNotMatch(source, /LOCAL_WORKER_TOKEN.*update/);
 });

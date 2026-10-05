@@ -96,7 +96,7 @@ test("pair/start sends only token_hash and never sends the raw Token or Bearer s
       token_hash: hashWorkerToken(token),
       hostname: "test-host",
       workspace_allowlist: ["workspace-a"],
-      client_version: "0.3.1",
+      client_version: "0.3.2",
     }, new AbortController().signal);
     assert.equal(result.url, "/api/pair/start");
     assert.equal(result.auth, null);
