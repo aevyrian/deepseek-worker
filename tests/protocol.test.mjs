@@ -135,7 +135,7 @@ test("heartbeat carries only explicit Workspace identity metadata", async () => 
       state: "online",
       workspace_allowlist: ["workspace-a"],
       workspaces: [{ id: "workspace-a", name: "Project A" }],
-      client_version: "0.3.3-preview.1",
+      client_version: "0.3.3-preview.2",
     }, new AbortController().signal);
     assert.deepEqual(result.workspaces, [{ id: "workspace-a", name: "Project A" }]);
     assert.deepEqual(result.workspace_allowlist, ["workspace-a"]);
