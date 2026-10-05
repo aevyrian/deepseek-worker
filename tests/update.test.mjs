@@ -13,6 +13,7 @@ import {
   isTrustedSource,
   parseSemver,
   performUpdateCheck,
+  publicUpdateStatus,
   resolveUpdateCandidate,
   selectUpdateCandidate,
   validateUpdateManifest,
@@ -105,6 +106,23 @@ function pluginManager({
 test("updater current version stays synchronized with package.json", async () => {
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.version, CONNECTOR_VERSION);
+});
+
+test("update status distinguishes running and installed versions", () => {
+  const runtime = createUpdateRuntime("0.3.3-preview.6");
+  runtime.installedVersion = "0.4.8";
+  runtime.latestVersion = "0.4.8";
+  runtime.updateState = "restart-required";
+  runtime.restartRequired = true;
+  assert.deepEqual(publicUpdateStatus(runtime), {
+    currentVersion: "0.3.3-preview.6",
+    installedVersion: "0.4.8",
+    latestVersion: "0.4.8",
+    updateState: "restart-required",
+    lastCheckedAt: null,
+    restartRequired: true,
+    lastUpdateError: null,
+  });
 });
 
 test("Semantic Version comparison follows SemVer precedence", () => {
