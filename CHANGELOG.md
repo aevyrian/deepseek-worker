@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3-preview.5
+
+- 更新通道在中文界面改为“正式版 / 测试版”，不再直接向普通用户显示 stable / preview。
+- 默认通道仍为“正式版”；底层配置与更新协议继续使用稳定的 `stable` / `preview` 内部值，不影响兼容性。
+- 同步当前版本号，用于 1.0.0 前的最终真机验收。
+
 ## 0.3.3-preview.4
 
 - 修复“总控执行模式”把 `@deepseek-ai/dsh-tool-schedule` 当作硬依赖导致新 Native Session 在部分 Harness 安装中报 `never started` 的问题。

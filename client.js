@@ -94,8 +94,8 @@ window.__ModuleLoader__.load({
       updateStatus: "更新状态",
       enabled: "开启",
       disabled: "关闭",
-      stable: "stable",
-      preview: "preview",
+      stable: "正式版",
+      preview: "测试版",
       updateIdle: "等待自动检查",
       updateChecking: "正在检查更新",
       updateCurrent: "已是最新版本",
@@ -754,7 +754,7 @@ window.__ModuleLoader__.load({
           h("h3", { style: { margin: 0 } }, t("version")),
           h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
             h("span", null, t("version")),
-            h("strong", null, status?.currentVersion || "0.3.3-preview.1"),
+            h("strong", null, status?.currentVersion || "0.3.3-preview.5"),
           ),
           h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
             h("span", null, t("autoUpdate")),
@@ -781,7 +781,7 @@ window.__ModuleLoader__.load({
           ),
           h(StatusLine, { label: t("updateStatus"), value: updateState, display: updateDisplay }),
           status?.restartRequired
-            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.3.3-preview.1"} · ${t("updateRestart")}`)
+            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.3.3-preview.5"} · ${t("updateRestart")}`)
             : null,
           updateState === "failed"
             ? h("div", { style: gridStyle },
@@ -857,7 +857,7 @@ window.__ModuleLoader__.load({
             h(StatusLine, { label: t("worker"), value: status?.worker || "paused", display: status?.worker || "paused" }),
             h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
               h("span", null, t("latestVersion")),
-              h("span", null, status?.latestVersion || status?.currentVersion || "0.3.3-preview.1"),
+              h("span", null, status?.latestVersion || status?.currentVersion || "0.3.3-preview.5"),
             ),
             h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
               h("span", null, t("lastChecked")),
