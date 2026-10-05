@@ -40,6 +40,7 @@ import {
   AutoUpdateController,
   CONNECTOR_VERSION,
   createUpdateRuntime,
+  isNewerVersion,
   publicUpdateStatus,
 } from "./lib/update.mjs";
 
@@ -83,6 +84,31 @@ function currentCredentials(ctx) {
 
 function currentPluginManager(ctx) {
   return optionalService(ctx, "pluginManager");
+}
+
+async function syncInstalledConnectorVersion(runtime, pluginManager) {
+  if (!pluginManager || typeof pluginManager.listBundles !== "function") return;
+  try {
+    const bundles = await pluginManager.listBundles();
+    const installed = Array.isArray(bundles)
+      ? bundles.find((bundle) => bundle?.name === "deepseek-worker-connector")
+      : undefined;
+    const installedVersion = typeof installed?.version === "string" && installed.version.trim()
+      ? installed.version.trim()
+      : null;
+    if (!installedVersion) return;
+
+    runtime.installedVersion = installedVersion;
+    const runningVersion = runtime.currentVersion || CONNECTOR_VERSION;
+    if (isNewerVersion(installedVersion, runningVersion)) {
+      runtime.latestVersion = installedVersion;
+      runtime.updateState = "restart-required";
+      runtime.restartRequired = true;
+      runtime.lastUpdateError = null;
+    }
+  } catch {
+    // Status must remain available even if Plugin Manager inventory is temporarily unavailable.
+  }
 }
 
 async function describeWorkerCredential(credentials) {
@@ -217,6 +243,7 @@ export class WorkerControlService extends TypertRemoteService {
       const config = currentConfig(this.input);
       const workspaces = workspaceState(config, this.ctx.workspaceRegistry);
       const controller = currentSessionController(this.ctx);
+      await syncInstalledConnectorVersion(this.runtime, currentPluginManager(this.ctx));
       this.runtime.workerId = config.workerId;
       this.runtime.workspaceCount = workspaces.count;
       this.runtime.execution = executionMode(controller !== undefined);
