@@ -24,6 +24,7 @@ import {
   workspaceForTask,
 } from "./lib/protocol.mjs";
 import { authorizedWorkspaceState, workspaceHeartbeatPayload } from "./lib/workspaces.mjs";
+import { executeNativeSession } from "./lib/native-session.mjs";
 import {
   classifyPairingError,
   credentialInfo,
@@ -723,7 +724,7 @@ async function sleep(ms, signal) {
   }
 }
 
-async function processLease(ctx, config, token, task, outerSignal) {
+export async function processLease(ctx, config, token, task, outerSignal) {
   const leaseAbort = new AbortController();
   const relayAbort = () => leaseAbort.abort(outerSignal.reason);
   outerSignal.addEventListener("abort", relayAbort, { once: true });

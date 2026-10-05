@@ -82,6 +82,7 @@ test("new Native Session is created with WorkspaceId and never cwd", async () =>
   assert.equal(Object.hasOwn(controller.calls.create[0], "cwd"), false);
   assert.equal(result.sessionId, "session-new");
   assert.equal(result.result, "Done from Harness.");
+  assert.equal(result.executor, "harness-native");
 });
 
 test("continuation resumes the original Session only after Workspace and cwd validation", async () => {
@@ -153,4 +154,54 @@ test("assistant extraction only reads messages after the task baseline", () => {
     { type: "assistant/message", seq: 3, data: { message: { content: [{ type: "text", text: "new" }] } } },
   ];
   assert.equal(latestAssistantText(events, 1), "new");
+});
+
+test("timed out Native Session cancels its accepted turn and removes listeners", async () => {
+  const ctx = fakeContext();
+  const session = fakeSession();
+  const controller = successfulController(ctx, session);
+  controller.prompt = async () => ({ accepted: true });
+  let cancellations = 0;
+  controller.cancel = ({ sessionId }) => {
+    assert.equal(sessionId, "session-new");
+    cancellations += 1;
+  };
+  await assert.rejects(
+    () => executeNativeSession(ctx, controller, { id: "task-timeout" },
+      { id: "workspace-a", path: "E:\\Project", sessionIds: [] }, "Wait", new AbortController().signal, 10),
+    /timed out/,
+  );
+  assert.equal(cancellations, 1);
+});
+
+test("aborted Native Session cancels its accepted turn", async () => {
+  const ctx = fakeContext();
+  const session = fakeSession();
+  const controller = successfulController(ctx, session);
+  controller.prompt = async () => ({ accepted: true });
+  let cancellations = 0;
+  controller.cancel = () => { cancellations += 1; };
+  const abort = new AbortController();
+  const execution = executeNativeSession(ctx, controller, { id: "task-abort" },
+    { id: "workspace-a", path: "E:\\Project", sessionIds: [] }, "Wait", abort.signal, 1000);
+  setTimeout(() => abort.abort(new Error("lease lost")), 10);
+  await assert.rejects(() => execution, /lease lost/);
+  assert.equal(cancellations, 1);
+});
+
+test("Native Session with no assistant result fails explicitly", async () => {
+  const ctx = fakeContext();
+  const session = fakeSession();
+  const controller = successfulController(ctx, session);
+  controller.prompt = async () => {
+    const turnEnd = { type: "turn/end", seq: 1, data: { reason: "completed" } };
+    session.events.push(turnEnd);
+    queueMicrotask(() => ctx.emit("session/event", session, turnEnd));
+    return { accepted: true };
+  };
+  await assert.rejects(
+    () => executeNativeSession(ctx, controller, { id: "task-empty" },
+      { id: "workspace-a", path: "E:\\Project", sessionIds: [] }, "Work", new AbortController().signal, 1000),
+    /without an assistant result/,
+  );
 });
