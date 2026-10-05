@@ -15,7 +15,7 @@ DeepSeek Harness 原生本地 Worker Connector。当前正式版本：**0.3.2**�
 
 Harness 启动约 20 秒后检查一次；长时间运行时最多每 6 小时检查一次。
 
-普通 UI 底部显示当前版本、自动更新开关、stable/preview 通道和更新状态。状态包括：
+普通 UI 底部显示当前版本、自动更新开关、正式版/测试版通道和更新状态。底层协议仍使用 stable/preview，普通用户无需理解英文内部值。状态包括：
 
     idle
     checking
@@ -141,7 +141,7 @@ Browser 不读取保存后的 Token，也不把 Token 写 URL、Local Storage、
 更完整设计见 docs/UPDATE.md。
 
 
-## 总控执行模式（0.3.3-preview.4）
+## 总控执行模式（0.3.3-preview.5）
 
 Connector bundle 内置 `orchestrator-worker` Agent Preset，界面名称为“总控执行模式”。
 
