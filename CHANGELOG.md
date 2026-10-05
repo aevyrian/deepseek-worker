@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.3-preview.7
+## 0.4.7
 
 - 恢复 Harness 预设列表中的“总控执行模式”，同时保持 Connector 可正常停用和卸载。
 - 不再把 `@deepseek-ai/dsh-agent-preset` 作为 bundle 的第二个常驻 Loader 行；Connector 启动时通过 Harness 官方 Agent Preset Registry 动态注册 `orchestrator-worker`，停用/卸载时由同一生命周期自动注销。
