@@ -10,15 +10,20 @@ import {
   classifyConnectionError,
   executionMode,
   generateWorkerToken,
+  missingAuthorizedWorkspaceIds,
   publicRuntimeStatus,
   redactSecret,
   snapshotConnectorInput,
 } from "./lib/connector-config.mjs";
-import { buildTaskPrompt, extractAssistantText, normalizeConfig, workerRequest, workspaceForTask } from "./lib/protocol.mjs";
+import {
+  buildTaskPrompt,
+  extractAssistantText,
+  normalizeConfig,
+  workerRequest,
+  workspaceForTask,
+} from "./lib/protocol.mjs";
 
 export const name = "deepseek-worker-connector";
-
-const ABSOLUTE_PATH_PATTERN = /^(?:[A-Za-z]:[\\/]|\\\\|\/)/u;
 
 export const Config = Schema.object({
   endpoint: Schema.string().pattern(/^https:\/\//u).default(DEFAULT_ENDPOINT).volatile(),
@@ -27,7 +32,8 @@ export const Config = Schema.object({
   heartbeatIntervalMs: Schema.number().step(1).min(5000).max(300000).default(20000).volatile(),
   leaseRenewIntervalMs: Schema.number().step(1).min(5000).max(55000).default(20000).volatile(),
   leaseWaitTimeoutMs: Schema.number().step(1).min(10000).max(86400000).default(1800000).volatile(),
-  workspaceAllowlist: Schema.dict(Schema.string().pattern(ABSOLUTE_PATH_PATTERN)).default({}).volatile(),
+  authorizedWorkspaceIds: Schema.array(Schema.string().pattern(/\S/u)).default([]).volatile(),
+  trustedWorkspaceMode: Schema.boolean().default(true).volatile(),
   enableHeadlessFallback: Schema.boolean().default(true).volatile(),
   headlessCommand: Schema.string().pattern(/\S/u).default("dsh").volatile(),
   headlessArgs: Schema.array(Schema.string()).default(["--profile", "headless", "--json"]).volatile(),
@@ -45,10 +51,10 @@ function currentSessionController(ctx) {
   }
 }
 
-function initialRuntime(ctx) {
+function initialRuntime() {
   return {
     connector: "loaded",
-    execution: executionMode(Boolean(currentSessionController(ctx))),
+    execution: "unknown",
     credential: "unknown",
     cloud: "untested",
     worker: "paused",
@@ -56,6 +62,14 @@ function initialRuntime(ctx) {
     workerId: DEFAULT_WORKER_ID,
     workspaceCount: 0,
     lastError: null,
+  };
+}
+
+function workspaceState(config, registry) {
+  const availableIds = registry.list().map((workspace) => String(workspace.id));
+  return {
+    missing: missingAuthorizedWorkspaceIds(config.authorizedWorkspaceIds, availableIds),
+    count: config.authorizedWorkspaceIds.length,
   };
 }
 
@@ -74,16 +88,23 @@ class WorkerControlService extends TypertRemoteService {
     } catch {}
     try {
       const config = currentConfig(this.input);
+      const workspaces = workspaceState(config, this.owner.workspaceRegistry);
+      const controller = currentSessionController(this.owner);
       this.runtime.workerId = config.workerId;
-      this.runtime.workspaceCount = Object.keys(config.workspaceAllowlist).length;
-      this.runtime.execution = executionMode(Boolean(currentSessionController(this.owner)));
+      this.runtime.workspaceCount = workspaces.count;
+      this.runtime.execution = executionMode(controller !== undefined);
       return publicRuntimeStatus(this.runtime, {
         credentialConfigured,
         workerId: config.workerId,
-        workspaceCount: this.runtime.workspaceCount,
+        workspaceCount: workspaces.count,
+        missingWorkspaceIds: workspaces.missing,
+        trustedWorkspaceMode: config.trustedWorkspaceMode,
       });
     } catch (error) {
-      return publicRuntimeStatus({ ...this.runtime, worker: "error", lastError: redactSecret(error) }, { credentialConfigured });
+      return publicRuntimeStatus(
+        { ...this.runtime, execution: "unknown", worker: "error", lastError: redactSecret(error) },
+        { credentialConfigured },
+      );
     }
   }
 
@@ -98,9 +119,16 @@ class WorkerControlService extends TypertRemoteService {
     } catch (error) {
       return { ok: false, code: "config_invalid", message: redactSecret(error) };
     }
-    const workspaceIds = Object.keys(config.workspaceAllowlist);
-    if (workspaceIds.length === 0) {
-      return { ok: false, code: "workspace_missing", message: "Workspace 未配置。请至少添加一个允许访问的本地目录。" };
+    if (config.authorizedWorkspaceIds.length === 0) {
+      return { ok: false, code: "workspace_missing", message: "尚未授权任何 Harness Workspace。" };
+    }
+    const workspaces = workspaceState(config, this.owner.workspaceRegistry);
+    if (workspaces.missing.length > 0) {
+      return {
+        ok: false,
+        code: "workspace_not_found",
+        message: `以下授权 Workspace 已不存在：${workspaces.missing.join(", ")}。请在配置页重新选择。`,
+      };
     }
     let token;
     try {
@@ -112,15 +140,24 @@ class WorkerControlService extends TypertRemoteService {
     try {
       await workerRequest(config, token, "register", {
         hostname: hostname(),
-        workspace_allowlist: workspaceIds,
+        workspace_allowlist: config.authorizedWorkspaceIds,
       }, AbortSignal.timeout(10000));
       this.runtime.credential = "configured";
       this.runtime.cloud = "online";
-      this.runtime.worker = "online";
-      this.runtime.lastError = null;
+      this.runtime.worker = config.trustedWorkspaceMode ? "online" : "paused";
+      this.runtime.lastError = config.trustedWorkspaceMode
+        ? null
+        : "当前为受限工作区模式；beta.3 不领取远程执行任务。";
       this.runtime.workerId = config.workerId;
-      this.runtime.workspaceCount = workspaceIds.length;
-      return { ok: true, code: "connected", message: "连接成功。", workerId: config.workerId };
+      this.runtime.workspaceCount = config.authorizedWorkspaceIds.length;
+      return {
+        ok: true,
+        code: "connected",
+        message: config.trustedWorkspaceMode
+          ? "连接成功。授权 Harness Workspace 已报告给 Cloud。"
+          : "连接成功；当前处于受限工作区模式，beta.3 不领取远程执行任务。",
+        workerId: config.workerId,
+      };
     } catch (error) {
       const mapped = classifyConnectionError(error);
       this.runtime.cloud = mapped.cloud;
@@ -148,19 +185,23 @@ function markRemoteMethod(prototype, methodName) {
   for (const initializer of initializers) initializer.call(receiver);
 }
 
-for (const method of ["status", "generateToken", "test"]) markRemoteMethod(WorkerControlService.prototype, method);
+for (const method of ["status", "generateToken", "test"]) {
+  markRemoteMethod(WorkerControlService.prototype, method);
+}
 
 export async function apply(ctx, input = {}) {
   const lifecycle = new AbortController();
-  const runtime = initialRuntime(ctx);
+  const runtime = initialRuntime();
   ctx.effect(() => () => lifecycle.abort(new Error("DeepSeek Worker Connector stopped")));
 
-  await ctx.inject(["credentials"], async (scope) => {
+  await ctx.inject(["credentials", "workspaceRegistry"], async (scope) => {
     new WorkerControlService(scope, input, runtime);
     try {
       await runWorker(scope, input, runtime, lifecycle.signal);
     } catch (error) {
-      if (!lifecycle.signal.aborted) scope.logger.error("deepseek-worker connector stopped: %s", redactSecret(error));
+      if (!lifecycle.signal.aborted) {
+        scope.logger.error("deepseek-worker connector stopped: %s", redactSecret(error));
+      }
     }
   });
 }
@@ -176,14 +217,31 @@ async function runWorker(ctx, input, runtime, signal) {
     try {
       const config = currentConfig(input);
       pollIntervalMs = config.pollIntervalMs;
-      const workspaceIds = Object.keys(config.workspaceAllowlist);
+      const controller = currentSessionController(ctx);
+      const workspaces = workspaceState(config, ctx.workspaceRegistry);
       runtime.workerId = config.workerId;
-      runtime.workspaceCount = workspaceIds.length;
-      runtime.execution = executionMode(Boolean(currentSessionController(ctx)));
+      runtime.workspaceCount = workspaces.count;
+      runtime.execution = executionMode(controller !== undefined);
 
-      if (workspaceIds.length === 0) {
+      if (config.authorizedWorkspaceIds.length === 0) {
         runtime.worker = "paused";
-        runtime.lastError = "Workspace allowlist 为空；Connector 已安全暂停。";
+        runtime.lastError = "未授权 Harness Workspace；Connector 已安全暂停。";
+        registeredSignature = "";
+        registeredToken = undefined;
+        await sleep(pollIntervalMs, signal);
+        continue;
+      }
+      if (workspaces.missing.length > 0) {
+        runtime.worker = "paused";
+        runtime.lastError = `授权 Workspace 已不存在：${workspaces.missing.join(", ")}。`;
+        registeredSignature = "";
+        registeredToken = undefined;
+        await sleep(pollIntervalMs, signal);
+        continue;
+      }
+      if (!config.trustedWorkspaceMode) {
+        runtime.worker = "paused";
+        runtime.lastError = "当前为受限工作区模式；beta.3 不领取远程执行任务。";
         registeredSignature = "";
         registeredToken = undefined;
         await sleep(pollIntervalMs, signal);
@@ -202,9 +260,16 @@ async function runWorker(ctx, input, runtime, signal) {
       }
       runtime.credential = "configured";
 
-      const registrationSignature = JSON.stringify({ endpoint: config.endpoint, workerId: config.workerId, workspaceIds: [...workspaceIds].sort() });
+      const registrationSignature = JSON.stringify({
+        endpoint: config.endpoint,
+        workerId: config.workerId,
+        workspaceIds: [...config.authorizedWorkspaceIds].sort(),
+      });
       if (registeredSignature !== registrationSignature || registeredToken !== token) {
-        await workerRequest(config, token, "register", { hostname: hostname(), workspace_allowlist: workspaceIds }, signal);
+        await workerRequest(config, token, "register", {
+          hostname: hostname(),
+          workspace_allowlist: config.authorizedWorkspaceIds,
+        }, signal);
         registeredSignature = registrationSignature;
         registeredToken = token;
         lastHeartbeatAt = 0;
@@ -255,23 +320,38 @@ async function processLease(ctx, config, token, task, outerSignal) {
     leaseAbort.abort(error);
   });
   try {
-    const { workspaceId, cwd } = workspaceForTask(config, task);
+    const { workspaceId } = workspaceForTask(config, task);
+    const workspace = ctx.workspaceRegistry.get(workspaceId);
+    if (workspace === undefined) throw new Error(`Authorized Harness Workspace "${workspaceId}" no longer exists`);
     const prompt = buildTaskPrompt(task);
-    await workerRequest(config, token, "events", { task_id: task.id, event: "local_started", data: { workspace_id: workspaceId } }, outerSignal);
+    await workerRequest(config, token, "events", {
+      task_id: task.id,
+      event: "local_started",
+      data: { workspace_id: workspaceId, trusted_workspace: config.trustedWorkspaceMode },
+    }, outerSignal);
     const controller = currentSessionController(ctx);
     const execution = controller
-      ? await executeNative(controller, task, cwd, prompt, leaseAbort.signal, config.leaseWaitTimeoutMs)
-      : await executeHeadless(config, task, cwd, prompt, leaseAbort.signal);
-    if (leaseLost || leaseAbort.signal.aborted && !outerSignal.aborted) throw leaseAbort.signal.reason || new Error("Worker lease was lost");
+      ? await executeNativeSession(ctx, controller, task, workspace, prompt, leaseAbort.signal, config.leaseWaitTimeoutMs)
+      : await executeHeadless(config, task, workspace, prompt, leaseAbort.signal);
+    if (leaseLost || leaseAbort.signal.aborted && !outerSignal.aborted) {
+      throw leaseAbort.signal.reason || new Error("Worker lease was lost");
+    }
     await workerRequest(config, token, "result", {
       task_id: task.id,
       result: execution.result,
       session_id: execution.sessionId,
-      metadata: { executor: execution.executor, workspace_id: workspaceId },
+      metadata: {
+        executor: execution.executor,
+        workspace_id: workspaceId,
+        trusted_workspace: config.trustedWorkspaceMode,
+      },
     }, outerSignal);
   } catch (error) {
     if (!leaseLost && !outerSignal.aborted) {
-      await workerRequest(config, token, "failure", { task_id: task.id, error: redactSecret(error, token) }, outerSignal).catch(() => {});
+      await workerRequest(config, token, "failure", {
+        task_id: task.id,
+        error: redactSecret(error, token),
+      }, outerSignal).catch(() => {});
     }
   } finally {
     leaseAbort.abort();
@@ -288,27 +368,20 @@ async function renewLease(config, token, taskId, signal) {
   }
 }
 
-async function executeNative(controller, task, cwd, prompt, signal, timeoutMs) {
-  const existingSessionId = task.session_id || task.harness_session_id || null;
-  const session = existingSessionId
-    ? await controller.resume(existingSessionId, { cwd, signal })
-    : await controller.create({ cwd, signal });
-  const sessionId = typeof session === "string" ? session : session?.id || existingSessionId;
-  if (!sessionId) throw new Error("Harness Session Controller did not return a session ID");
-  await controller.submit(session, { text: prompt, signal });
-  const completed = typeof controller.waitForIdle === "function"
-    ? await controller.waitForIdle(session, { timeoutMs, signal })
-    : typeof controller.snapshot === "function" ? await controller.snapshot(session) : null;
-  const result = extractAssistantText(completed);
-  if (!result) throw new Error("Harness Session finished without an assistant result");
-  return { result, sessionId, executor: "harness-session-controller" };
-}
-
-async function executeHeadless(config, task, cwd, prompt, signal) {
-  if (!config.enableHeadlessFallback) throw new Error("Harness Session Controller is unavailable and headless fallback is disabled");
+async function executeHeadless(config, task, workspace, prompt, signal) {
+  if (!config.enableHeadlessFallback) {
+    throw new Error("Harness Session Controller is unavailable and headless fallback is disabled");
+  }
+  if (task.session_id || task.harness_session_id) {
+    throw new Error("Cannot safely resume an existing Harness Session through the generic headless fallback");
+  }
+  const cwd = workspace.path;
   const args = [...config.headlessArgs, "--cwd", cwd, "--prompt", prompt];
-  if (task.session_id || task.harness_session_id) throw new Error("Cannot safely resume an existing Harness Session through the generic headless fallback");
-  const child = spawn(config.headlessCommand, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(config.headlessCommand, args, {
+    cwd,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   const stdout = [];
   const stderr = [];
   const limit = 8 * 1024 * 1024;
@@ -321,14 +394,23 @@ async function executeHeadless(config, task, cwd, prompt, signal) {
   child.stderr.on("data", collect(stderr));
   const abort = () => child.kill();
   signal.addEventListener("abort", abort, { once: true });
-  const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+  const code = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
   signal.removeEventListener("abort", abort);
   if (signal.aborted) throw signal.reason || new Error("Harness task aborted");
-  if (code !== 0) throw new Error(`Headless Harness exited with ${code}: ${redactSecret(Buffer.concat(stderr).toString("utf8").slice(-4000))}`);
+  if (code !== 0) {
+    throw new Error(`Headless Harness exited with ${code}: ${redactSecret(Buffer.concat(stderr).toString("utf8").slice(-4000))}`);
+  }
   const text = Buffer.concat(stdout).toString("utf8").trim();
   let parsed;
   try { parsed = JSON.parse(text); } catch { throw new Error("Headless Harness did not return JSON output"); }
   const result = extractAssistantText(parsed);
   if (!result) throw new Error("Headless Harness returned no assistant result");
-  return { result, sessionId: parsed.session_id || parsed.sessionId || null, executor: "harness-headless-fallback" };
+  return {
+    result,
+    sessionId: parsed.session_id || parsed.sessionId || null,
+    executor: "harness-headless-fallback",
+  };
 }

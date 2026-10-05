@@ -16,10 +16,16 @@ Push-Location $bundleRoot
 try {
   & node --check .\index.js
   if ($LASTEXITCODE -ne 0) { throw 'index.js syntax check failed.' }
+  & node --check .\client.js
+  if ($LASTEXITCODE -ne 0) { throw 'client.js syntax check failed.' }
+  & node --check .\lib\connector-config.mjs
+  if ($LASTEXITCODE -ne 0) { throw 'connector-config.mjs syntax check failed.' }
   & node --check .\lib\protocol.mjs
   if ($LASTEXITCODE -ne 0) { throw 'protocol.mjs syntax check failed.' }
-  & node --test .\tests\protocol.test.mjs
-  if ($LASTEXITCODE -ne 0) { throw 'Connector protocol tests failed.' }
+  & node --check .\lib\native-session.mjs
+  if ($LASTEXITCODE -ne 0) { throw 'native-session.mjs syntax check failed.' }
+  & node --test .\tests\*.test.mjs
+  if ($LASTEXITCODE -ne 0) { throw 'Connector test suite failed.' }
 } finally {
   Pop-Location
 }
@@ -35,7 +41,7 @@ if ($Profile) {
   if ($bundles -notcontains 'deepseek-worker-connector') {
     throw "Harness profile '$Profile' does not list deepseek-worker-connector in dsh.profile.bundles."
   }
-  Write-Host "Harness profile '$Profile' contains the connector bundle. Confirm activation in the Harness startup log."
+  Write-Host "Harness profile '$Profile' contains the connector bundle. Confirm beta.3 UI and Remote activation in Desktop."
 }
 
 Write-Host 'Local checks passed. No Site requests, D1 writes, credential reads, or profile changes were made by this test script.'

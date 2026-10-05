@@ -3,27 +3,30 @@ import assert from "node:assert/strict";
 import {
   classifyConnectionError,
   executionMode,
+  missingAuthorizedWorkspaceIds,
+  normalizeAuthorizedWorkspaceIds,
   publicRuntimeStatus,
+  reconcileAuthorizedWorkspaceIds,
   redactSecret,
   snapshotConnectorInput,
   workerTokenFromBytes,
-  workspaceEntriesToAllowlist,
 } from "../lib/connector-config.mjs";
-import { WorkerApiError, normalizeConfig } from "../lib/protocol.mjs";
+import { WorkerApiError } from "../lib/protocol.mjs";
 
-test("validates workspace IDs, absolute paths, and duplicates", () => {
-  assert.throws(() => workspaceEntriesToAllowlist([{ id: "", path: "E:/Projects/a" }]), /ID/);
-  assert.throws(() => workspaceEntriesToAllowlist([{ id: "a", path: "relative/path" }]), /absolute/);
-  assert.throws(() => workspaceEntriesToAllowlist([{ id: "a", path: "E:/Projects/a" }, { id: "a", path: "E:/Projects/b" }]), /Duplicate/);
-  assert.deepEqual(workspaceEntriesToAllowlist([{ id: "novel", path: "E:/项目/deep" }]), { novel: "E:\\项目\\deep" });
+test("normalizes authorized Harness Workspace IDs without local path data", () => {
+  assert.deepEqual(
+    normalizeAuthorizedWorkspaceIds(["workspace-a", " workspace-b ", "workspace-a"]),
+    ["workspace-a", "workspace-b"],
+  );
+  assert.throws(() => normalizeAuthorizedWorkspaceIds([""]), /non-empty/);
+  assert.throws(() => normalizeAuthorizedWorkspaceIds({}), /array/);
 });
 
-test("normalizes Windows and POSIX absolute workspace paths while requiring HTTPS", () => {
-  const windows = normalizeConfig({ endpoint: "https://example.test/api/worker", workspaceAllowlist: { win: "E:/Projects/repo" } });
-  assert.equal(windows.workspaceAllowlist.win, "E:\\Projects\\repo");
-  const posix = normalizeConfig({ endpoint: "https://example.test/api/worker", workspaceAllowlist: { unix: "/srv/repo" } });
-  assert.equal(posix.workspaceAllowlist.unix, "/srv/repo");
-  assert.throws(() => normalizeConfig({ endpoint: "http://example.test/api/worker" }), /HTTPS/);
+test("reconciles deleted Harness Workspaces from a persisted selection", () => {
+  const selected = ["workspace-a", "workspace-old", "workspace-b"];
+  const available = ["workspace-a", "workspace-b"];
+  assert.deepEqual(reconcileAuthorizedWorkspaceIds(selected, available), ["workspace-a", "workspace-b"]);
+  assert.deepEqual(missingAuthorizedWorkspaceIds(selected, available), ["workspace-old"]);
 });
 
 test("generates a 64-hex-character worker token from at least 32 random bytes", () => {
@@ -32,20 +35,42 @@ test("generates a 64-hex-character worker token from at least 32 random bytes", 
   assert.throws(() => workerTokenFromBytes(new Uint8Array(31)), /32 bytes/);
 });
 
-test("public status never returns the credential value", () => {
+test("public status never returns the credential value and preserves unknown execution", () => {
   const secret = "super-secret-value";
-  const status = publicRuntimeStatus({ connector: "loaded", execution: "native", credential: secret, worker: "online" }, { credentialConfigured: true, workerId: "w", workspaceCount: 1 });
+  const status = publicRuntimeStatus(
+    { connector: "loaded", execution: "unknown", credential: secret, worker: "paused" },
+    {
+      credentialConfigured: true,
+      workerId: "worker-a",
+      workspaceCount: 1,
+      missingWorkspaceIds: ["workspace-old"],
+      trustedWorkspaceMode: true,
+    },
+  );
   assert.equal(status.credential, "configured");
+  assert.equal(status.execution, "unknown");
+  assert.deepEqual(status.missingWorkspaceIds, ["workspace-old"]);
+  assert.equal(status.trustedWorkspaceMode, true);
   assert.equal(JSON.stringify(status).includes(secret), false);
   assert.equal(Object.hasOwn(status, "token"), false);
 });
 
-test("connector config serialization ignores token-shaped input", () => {
+test("connector config serialization contains WorkspaceIds but ignores token and local path maps", () => {
   const secret = "should-never-serialize";
-  const snapshot = snapshotConnectorInput({ endpoint: "https://example.test/api/worker", workspaceAllowlist: {}, LOCAL_WORKER_TOKEN: secret, token: secret });
-  assert.equal(JSON.stringify(snapshot).includes(secret), false);
-  assert.equal(Object.hasOwn(snapshot, "LOCAL_WORKER_TOKEN"), false);
-  assert.equal(Object.hasOwn(snapshot, "token"), false);
+  const snapshot = snapshotConnectorInput({
+    endpoint: "https://example.test/api/worker",
+    authorizedWorkspaceIds: ["workspace-a"],
+    trustedWorkspaceMode: true,
+    LOCAL_WORKER_TOKEN: secret,
+    token: secret,
+    workspaceAllowlist: { alias: "E:/secret/project" },
+  });
+  const json = JSON.stringify(snapshot);
+  assert.deepEqual(snapshot.authorizedWorkspaceIds, ["workspace-a"]);
+  assert.equal(snapshot.trustedWorkspaceMode, true);
+  assert.equal(json.includes(secret), false);
+  assert.equal(json.includes("E:/secret/project"), false);
+  assert.equal(Object.hasOwn(snapshot, "workspaceAllowlist"), false);
 });
 
 test("redacts explicit secrets and Bearer authorization", () => {
@@ -62,7 +87,8 @@ test("maps 401, 403, network, and TLS failures to user-facing connection states"
   assert.equal(classifyConnectionError(new Error("unable to verify TLS certificate")).code, "tls");
 });
 
-test("reports Native Harness separately from Headless fallback", () => {
+test("reports Native, Headless, and Unknown execution distinctly", () => {
   assert.equal(executionMode(true), "native");
   assert.equal(executionMode(false), "headless");
+  assert.equal(executionMode(undefined), "unknown");
 });

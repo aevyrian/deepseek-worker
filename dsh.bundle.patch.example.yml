@@ -8,7 +8,8 @@
         heartbeatIntervalMs: 20000
         leaseRenewIntervalMs: 20000
         leaseWaitTimeoutMs: 1800000
-        workspaceAllowlist: {}
+        authorizedWorkspaceIds: []
+        trustedWorkspaceMode: true
         enableHeadlessFallback: true
         headlessCommand: dsh
         headlessArgs: [--profile, headless, --json]
