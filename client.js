@@ -516,6 +516,10 @@ window.__ModuleLoader__.load({
             setPairingMessage(result.message || "连接失败");
             return;
           }
+          if (result.state === "paired") {
+            await refreshStatus();
+            return;
+          }
           const target = connectionUrl(result, status, draft.endpoint.trim());
           if (!target) {
             setPairingMessage("Cloud 未提供可用的 HTTPS 连接页面。");
