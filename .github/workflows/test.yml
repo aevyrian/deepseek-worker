@@ -20,6 +20,7 @@ jobs:
           node --check client.js
           node --check lib/connector-config.mjs
           node --check lib/protocol.mjs
+          node --check lib/workspaces.mjs
           node --check lib/native-session.mjs
           node --check lib/pairing.mjs
           node --check lib/update.mjs
