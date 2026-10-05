@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- 一键设备配对：每台 Worker 自动生成独立 Token，Cloud 只接收 SHA-256 token hash。
+- Host Remote 新增 `beginPairing / pairingStatus / disconnectPairing`。
+- 默认 UI 改为“连接 → 配对页面 → ChatGPT 身份确认 → 自动上线”。
+- 新增 `lib/pairing.mjs` 与 `docs/CLOUD-PAIRING.md`。
+
+### Changed
+
+- `LOCAL_WORKER_TOKEN` 改为本机设备凭据语义，不再要求普通用户配置全局 Site Secret。
+- 手工 Token 移入高级兼容区。
+- 401/403 提示改为设备凭据/配对语义。
+- 显式兼容 Harness 官方 `resolve() -> { value, source }`。
+
+### Compatibility
+
+- Cloud 0.3.0 尚未部署时，旧手工 Token / 0.2.1 Cloud 仍可通过高级兼容入口使用。
+- 配对 API 404 会明确提示 Cloud 尚未部署 0.3.0 配对 API。
+
+
 ## 0.2.1
 
 ### Fixed

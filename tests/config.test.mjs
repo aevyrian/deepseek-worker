@@ -80,9 +80,9 @@ test("redacts explicit secrets and Bearer authorization", () => {
   assert.match(text, /REDACTED/);
 });
 
-test("maps 401, 403, network, and TLS failures to user-facing connection states", () => {
-  assert.equal(classifyConnectionError(new WorkerApiError(401)).code, "token_mismatch");
-  assert.equal(classifyConnectionError(new WorkerApiError(403, "worker_not_paired")).code, "worker_unpaired");
+test("maps 401, 403, network, and TLS failures to 0.3.0 pairing-aware connection states", () => {
+  assert.equal(classifyConnectionError(new WorkerApiError(401)).code, "credential_rejected");
+  assert.equal(classifyConnectionError(new WorkerApiError(403, "worker_not_paired")).code, "pairing_required");
   assert.equal(classifyConnectionError(new Error("fetch failed: ECONNREFUSED")).code, "network");
   assert.equal(classifyConnectionError(new Error("unable to verify TLS certificate")).code, "tls");
 });

@@ -22,6 +22,12 @@ import {
   workerRequest,
   workspaceForTask,
 } from "./lib/protocol.mjs";
+import {
+  classifyPairingError,
+  credentialValue,
+  hashWorkerToken,
+  pairingRequest,
+} from "./lib/pairing.mjs";
 
 export const name = "deepseek-worker-connector";
 
@@ -69,6 +75,10 @@ function initialRuntime() {
     lastHeartbeat: null,
     workerId: DEFAULT_WORKER_ID,
     workspaceCount: 0,
+    pairing: "unpaired",
+    pairingCode: null,
+    approvalUrl: null,
+    pairingExpiresAt: null,
     lastError: null,
   };
 }
@@ -109,7 +119,7 @@ export class WorkerControlService extends TypertRemoteService {
     let credentialConfigured = false;
     if (credentials !== undefined) {
       try {
-        credentialConfigured = Boolean(await credentials.resolve(TOKEN_REF));
+        credentialConfigured = Boolean(credentialValue(await credentials.resolve(TOKEN_REF)));
       } catch {}
     }
 
@@ -138,6 +148,69 @@ export class WorkerControlService extends TypertRemoteService {
         { credentialConfigured },
       );
     }
+  }
+
+  async beginPairing() {
+    let config;
+    try { config = currentConfig(this.input); } catch (error) { return { ok: false, code: "config_invalid", message: redactSecret(error) }; }
+    if (config.authorizedWorkspaceIds.length === 0) return { ok: false, code: "workspace_missing", message: "尚未授权任何 Harness Workspace。" };
+    const workspaces = workspaceState(config, this.ctx.workspaceRegistry);
+    if (workspaces.missing.length > 0) return { ok: false, code: "workspace_not_found", message: `以下授权 Workspace 已不存在：${workspaces.missing.join(", ")}。请重新选择。` };
+    const credentials = currentCredentials(this.ctx);
+    if (credentials === undefined) return { ok: false, code: "credential_unavailable", message: "Harness Credential provider 不可用。" };
+    try {
+      const info = await credentials.describe(TOKEN_REF);
+      if (info?.writable === false) return { ok: false, code: "credential_readonly", message: "Harness Credential provider 当前不可写。" };
+    } catch (error) { return { ok: false, code: "credential_error", message: `读取 Credential 状态失败：${redactSecret(error)}` }; }
+    const token = generateWorkerToken();
+    try {
+      const started = await pairingRequest(config, undefined, "start", {
+        token_hash: hashWorkerToken(token), hostname: hostname(),
+        workspace_allowlist: config.authorizedWorkspaceIds, client_version: "0.3.0",
+      }, AbortSignal.timeout(10000));
+      await credentials.set(TOKEN_REF, token);
+      this.runtime.credential = "configured"; this.runtime.pairing = "pending";
+      this.runtime.pairingCode = started.code || started.pairing_code || null;
+      this.runtime.approvalUrl = started.approval_url || started.approvalUrl || null;
+      this.runtime.pairingExpiresAt = started.expires_at || started.expiresAt || null;
+      this.runtime.cloud = "online"; this.runtime.worker = "paused"; this.runtime.lastError = null;
+      return { ok: true, code: "pairing_started", state: "pending", pairingCode: this.runtime.pairingCode, approvalUrl: this.runtime.approvalUrl, expiresAt: this.runtime.pairingExpiresAt };
+    } catch (error) {
+      const mapped = classifyPairingError(error); this.runtime.lastError = mapped.message;
+      return { ok: false, code: mapped.code, message: mapped.message };
+    }
+  }
+
+  async pairingStatus() {
+    const config = currentConfig(this.input); const credentials = currentCredentials(this.ctx);
+    if (credentials === undefined) return { ok: false, code: "credential_unavailable", message: "Harness Credential provider 不可用。" };
+    const token = credentialValue(await credentials.resolve(TOKEN_REF));
+    if (!token) { this.runtime.pairing = "unpaired"; return { ok: false, code: "token_missing", message: "本机尚无 Worker 凭据。" }; }
+    try {
+      const result = await pairingRequest(config, token, "status", {}, AbortSignal.timeout(10000));
+      const state = result.state === "active" ? "paired" : (result.state || "unknown"); this.runtime.pairing = state;
+      if (state === "paired") {
+        this.runtime.cloud = "online"; this.runtime.worker = config.trustedWorkspaceMode ? "online" : "paused";
+        this.runtime.pairingCode = null; this.runtime.approvalUrl = null; this.runtime.pairingExpiresAt = null; this.runtime.lastError = null;
+      }
+      return { ok: true, state, pairingCode: result.code || result.pairing_code || this.runtime.pairingCode, approvalUrl: result.approval_url || result.approvalUrl || this.runtime.approvalUrl, expiresAt: result.expires_at || result.expiresAt || this.runtime.pairingExpiresAt };
+    } catch (error) {
+      const mapped = classifyPairingError(error); if (mapped.code === "pairing_credential_rejected") this.runtime.pairing = "unpaired";
+      return { ok: false, code: mapped.code, message: mapped.message };
+    }
+  }
+
+  async disconnectPairing() {
+    const config = currentConfig(this.input); const credentials = currentCredentials(this.ctx);
+    if (credentials === undefined) return { ok: false, code: "credential_unavailable", message: "Harness Credential provider 不可用。" };
+    const token = credentialValue(await credentials.resolve(TOKEN_REF));
+    if (!token) return { ok: true, code: "already_disconnected", state: "unpaired" };
+    try {
+      await pairingRequest(config, token, "disconnect", {}, AbortSignal.timeout(10000)); await credentials.unset(TOKEN_REF);
+      this.runtime.pairing = "unpaired"; this.runtime.credential = "unconfigured"; this.runtime.worker = "paused";
+      this.runtime.pairingCode = null; this.runtime.approvalUrl = null; this.runtime.pairingExpiresAt = null; this.runtime.lastError = null;
+      return { ok: true, code: "disconnected", state: "unpaired" };
+    } catch (error) { const mapped = classifyPairingError(error); return { ok: false, code: mapped.code, message: mapped.message }; }
   }
 
   generateToken() {
@@ -174,7 +247,7 @@ export class WorkerControlService extends TypertRemoteService {
 
     let token;
     try {
-      token = await credentials.resolve(TOKEN_REF);
+      token = credentialValue(await credentials.resolve(TOKEN_REF));
     } catch (error) {
       return { ok: false, code: "credential_error", message: `读取 Harness Credentials 失败：${redactSecret(error)}` };
     }
@@ -188,6 +261,7 @@ export class WorkerControlService extends TypertRemoteService {
       this.runtime.credential = "configured";
       this.runtime.cloud = "online";
       this.runtime.worker = config.trustedWorkspaceMode ? "online" : "paused";
+      this.runtime.pairing = "paired";
       this.runtime.lastError = config.trustedWorkspaceMode
         ? null
         : "当前为受限工作区模式；0.2.1 不领取远程执行任务。";
@@ -228,7 +302,7 @@ function markRemoteMethod(prototype, methodName) {
   for (const initializer of initializers) initializer.call(receiver);
 }
 
-for (const method of ["status", "generateToken", "test"]) {
+for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"]) {
   markRemoteMethod(WorkerControlService.prototype, method);
 }
 
@@ -286,7 +360,7 @@ async function runWorker(ctx, input, runtime, signal) {
         await sleep(pollIntervalMs, signal);
         continue;
       }
-      token = await credentials.resolve(TOKEN_REF);
+      token = credentialValue(await credentials.resolve(TOKEN_REF));
       if (!token) {
         runtime.credential = "unconfigured";
         runtime.worker = "paused";
@@ -313,6 +387,7 @@ async function runWorker(ctx, input, runtime, signal) {
         lastHeartbeatAt = 0;
         runtime.cloud = "online";
         runtime.worker = "online";
+        runtime.pairing = "paired";
         runtime.lastError = null;
       }
 
@@ -332,6 +407,8 @@ async function runWorker(ctx, input, runtime, signal) {
       const mapped = classifyConnectionError(error);
       runtime.cloud = mapped.cloud;
       runtime.worker = "error";
+      if (mapped.code === "pairing_required") runtime.pairing = "pending";
+      if (mapped.code === "credential_rejected") runtime.pairing = "unpaired";
       runtime.lastError = mapped.message;
       ctx.logger.warn("deepseek-worker connector loop: %s", redactSecret(error, token));
     }
