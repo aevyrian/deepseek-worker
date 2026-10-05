@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3-preview.3
+
+- Connector bundle now ships a selectable `orchestrator-worker` Agent Preset named “总控执行模式”.
+- The preset mirrors the current Standard-mode tool composition while replacing only the persona with a concise execution-first contract optimized for DeepSeek V4.1 Flash.
+- New Native Worker Sessions are created with `agentPreset: "orchestrator-worker"`, so ChatGPT-controlled tasks use the dedicated execution Agent automatically.
+- Existing continued/reworked tasks keep reusing their original Harness Session.
+- No model/provider is hard-coded; the Harness model selection remains authoritative.
+
 ## 0.3.3-preview.2
 
 - A failed or lost local Worker credential can be replaced through the normal ChatGPT connection flow. The Cloud keeps the old credential active until the same signed-in owner confirms the replacement in the browser.
