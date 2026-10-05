@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3-preview.2
+
+- A failed or lost local Worker credential can be replaced through the normal ChatGPT connection flow. The Cloud keeps the old credential active until the same signed-in owner confirms the replacement in the browser.
+- Startup checks pairing status before registration. Invalid credentials pause the Worker and show a reconnect action instead of repeatedly trying heartbeats.
+- Repeated connection clicks reuse paired or pending state and do not replace a working credential before Cloud accepts a new pairing.
+
 ## 0.3.3-preview.1
 
 ### Workspace discovery compatibility
