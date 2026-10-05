@@ -24,42 +24,24 @@ window.__ModuleLoader__.load({
     };
 
     const zh = {
-      summary: "绑定 Harness 原生 Workspace，并一键配对 DeepSeek Worker Cloud",
-      cloud: "云端连接",
-      endpoint: "云端地址",
-      workerId: "Worker ID",
-      token: "Worker Token",
-      configured: "已配置",
-      unconfigured: "未配置",
-      setToken: "设置 Token",
-      generatedToken: "刚生成的 Token",
-      generateToken: "生成随机 Token",
-      saveToken: "保存到 Harness",
-      copy: "复制",
-      copied: "已复制",
-      tokenHint: "高级兼容模式：手动 Token 仅用于旧 Cloud 或诊断。0.3.0 正常配对不需要在 Site 后台配置 Secret。",
-      tokenSiteHint: "手动 Token 不会上传到页面或 Git；正式配对请使用上方“连接 DeepSeek Worker”。",
-      pairing: "设备配对",
-      pairConnect: "连接 DeepSeek Worker",
-      pairConnecting: "正在创建配对…",
-      pairCheck: "检查配对状态",
-      pairDisconnect: "断开配对",
-      pairPending: "等待你确认配对",
-      pairPaired: "已配对",
-      pairUnpaired: "未配对",
-      pairUnknown: "状态未知",
-      pairCode: "配对码",
-      pairOpen: "打开配对页面",
-      pairHint: "首次连接会在本机自动生成独立 Worker 凭据并保存到 Harness Credentials。云端只保存凭据哈希，不需要共享全局 Site Secret。",
-      legacyToken: "高级：手动 Token（兼容旧 Cloud / 诊断）",
-      status: "Harness 状态",
-      connector: "Connector",
-      harness: "Execution",
-      credential: "Credential",
+      summary: "连接 ChatGPT，并授权 Harness Workspace",
+      deviceConnection: "设备连接",
+      connectionUnpaired: "未连接",
+      connectionConnecting: "正在连接",
+      connectionPending: "等待确认",
+      connectionPaired: "已连接",
+      connectionFailed: "连接失败",
+      installConnect: "安装并连接 ChatGPT",
+      openConnection: "打开连接页面",
+      checkStatus: "检查状态",
+      openChatGPT: "在 ChatGPT 中打开",
+      disconnect: "断开连接",
+      connecting: "正在连接…",
+      connectionHint: "Connector 会自动创建本机凭据、打开 Cloud 连接页面，并等待 ChatGPT 端确认。",
       cloudStatus: "Cloud",
-      worker: "Worker",
+      harness: "Harness",
+      workspacesAuthorized: "授权 Workspace",
       heartbeat: "最后心跳",
-      loaded: "已加载",
       native: "Native Harness",
       headless: "Headless fallback",
       detecting: "检测中",
@@ -68,20 +50,30 @@ window.__ModuleLoader__.load({
       offline: "离线",
       unauthenticated: "未认证",
       untested: "未测试",
-      paused: "paused",
-      error: "error",
-      test: "测试连接",
-      testing: "测试中…",
-      workspaces: "Harness Workspaces",
-      workspaceHint: "列表直接来自 Harness 官方 Workspace 服务。只保存 WorkspaceId，不保存本地路径副本。",
+      noHeartbeat: "--",
+      workspaces: "授权 Workspace",
+      workspaceHint: "选择允许 ChatGPT 任务使用的 Harness Workspace。",
       workspaceLoading: "正在读取 Harness Workspace…",
-      noWorkspaces: "Harness 当前没有 Workspace。请先在左侧“工作区”中创建项目。",
-      removedMissing: "已从当前草稿移除 Harness 中不存在的 Workspace；请保存配置。",
-      permissionMode: "权限模式",
+      noWorkspaces: "Harness 当前没有 Workspace。请先在左侧“工作区”创建项目。",
+      removedMissing: "已移除 Harness 中不存在的 Workspace；请保存配置。",
       trustedMode: "受信任工作区模式",
-      trustedHint: "在已授权 Workspace 内，Connector 不额外限制 Harness 的文件、Shell、Git、Build、Test 与其他工具能力；实际权限仍由 Harness Profile、工具审批和操作系统决定。",
-      restrictedHint: "关闭后进入受限模式。0.2.1 会暂停远程任务领取，而不是伪造一个并不存在的半权限沙箱。",
-      advanced: "高级设置",
+      trustedHint: "已授权 Workspace 内不额外收紧 Harness 权限；实际能力仍由 Harness Profile、工具审批和操作系统决定。",
+      restrictedHint: "关闭后暂停远程任务领取。",
+      advanced: "高级 / 诊断",
+      endpoint: "Cloud Endpoint",
+      workerId: "Worker ID",
+      token: "手动 Worker Token",
+      configured: "已配置",
+      unconfigured: "未配置",
+      setToken: "输入兼容 Token",
+      generateToken: "生成随机 Token",
+      saveToken: "保存 Token",
+      generatedToken: "刚生成的 Token",
+      tokenHint: "仅用于旧 Cloud、开发、诊断或恢复。普通连接流程不需要查看或复制 Token。",
+      pairingCode: "配对码",
+      connector: "Connector",
+      credential: "Credential",
+      worker: "Worker",
       poll: "Poll interval (ms)",
       heartbeatInterval: "Heartbeat interval (ms)",
       lease: "Lease renew interval (ms)",
@@ -92,66 +84,44 @@ window.__ModuleLoader__.load({
       saved: "配置已保存并即时应用。",
       saveFailed: "配置保存失败，请刷新后重试。",
       invalidEndpoint: "云端地址必须是 HTTPS。",
-      noHeartbeat: "--",
-      workspaceMissingStatus: "部分授权 Workspace 已不存在，请重新选择。",
+      test: "测试连接",
+      testing: "测试中…",
+      workspaceRequired: "请先选择至少一个 Harness Workspace。",
     };
+
     const en = {
       ...zh,
-      summary: "Bind native Harness Workspaces and configure Worker connectivity",
-      cloud: "Cloud connection",
-      endpoint: "Endpoint",
-      workerId: "Worker ID",
-      token: "Worker Token",
-      configured: "Configured",
-      unconfigured: "Not configured",
-      setToken: "Set Token",
-      generatedToken: "Newly generated Token",
-      generateToken: "Generate random Token",
-      saveToken: "Save to Harness",
-      copy: "Copy",
-      copied: "Copied",
-      status: "Harness status",
-      connector: "Connector",
-      harness: "Execution",
-      credential: "Credential",
+      summary: "Connect ChatGPT and authorize Harness Workspaces",
+      deviceConnection: "Device connection",
+      connectionUnpaired: "Not connected",
+      connectionConnecting: "Connecting",
+      connectionPending: "Waiting for approval",
+      connectionPaired: "Connected",
+      connectionFailed: "Connection failed",
+      installConnect: "Install and connect ChatGPT",
+      openConnection: "Open connection page",
+      checkStatus: "Check status",
+      openChatGPT: "Open in ChatGPT",
+      disconnect: "Disconnect",
+      connecting: "Connecting…",
+      connectionHint: "The Connector creates a local credential, opens the Cloud setup page, and waits for ChatGPT approval.",
       cloudStatus: "Cloud",
-      worker: "Worker",
+      harness: "Harness",
+      workspacesAuthorized: "Authorized Workspaces",
       heartbeat: "Last heartbeat",
-      loaded: "Loaded",
-      native: "Native Harness",
-      headless: "Headless fallback",
-      detecting: "Detecting",
-      unknown: "Unknown",
-      online: "Online",
-      offline: "Offline",
-      unauthenticated: "Unauthenticated",
-      untested: "Untested",
-      test: "Test connection",
-      testing: "Testing…",
-      workspaces: "Harness Workspaces",
+      workspaces: "Authorized Workspaces",
+      workspaceHint: "Choose which Harness Workspaces ChatGPT tasks may use.",
       workspaceLoading: "Loading Harness Workspaces…",
       noWorkspaces: "No Harness Workspace exists yet.",
-      permissionMode: "Permission mode",
       trustedMode: "Trusted Workspace mode",
-      advanced: "Advanced",
-      fallback: "Allow Headless fallback",
-      saveConfig: "Save configuration",
-      saving: "Saving…",
-      saved: "Configuration saved and applied live.",
-      saveFailed: "Could not save configuration. Refresh and retry.",
-      pairing: "Device pairing",
-      pairConnect: "Connect DeepSeek Worker",
-      pairConnecting: "Starting pairing…",
-      pairCheck: "Check pairing status",
-      pairDisconnect: "Disconnect",
-      pairPending: "Waiting for approval",
-      pairPaired: "Paired",
-      pairUnpaired: "Not paired",
-      pairUnknown: "Unknown",
-      pairCode: "Pairing code",
-      pairOpen: "Open pairing page",
-      pairHint: "First connection creates a unique local Worker credential automatically. The Cloud stores only its hash; no shared Site secret is required.",
-      legacyToken: "Advanced: manual Token (legacy Cloud / diagnostics)",
+      trustedHint: "Inside selected Workspaces the Connector adds no second permission layer; Harness and OS permissions still apply.",
+      restrictedHint: "Disables remote task claiming.",
+      advanced: "Advanced / Diagnostics",
+      token: "Manual Worker Token",
+      setToken: "Enter compatibility Token",
+      tokenHint: "For legacy Cloud, development, diagnostics, or recovery only.",
+      pairingCode: "Pairing code",
+      workspaceRequired: "Select at least one Harness Workspace first.",
     };
 
     const sectionStyle = {
@@ -204,11 +174,84 @@ window.__ModuleLoader__.load({
         : `Credential 读取失败（${code}）`;
     }
 
+    function cloudSetupUrl(endpoint, pairingCode) {
+      try {
+        const url = new URL(endpoint);
+        if (url.protocol !== "https:" || url.username || url.password) return null;
+        const path = url.pathname.replace(/\/+$/u, "");
+        if (!path.endsWith("/api/worker")) return null;
+        url.pathname = `${path.slice(0, -"/api/worker".length) || ""}/setup`;
+        url.search = "";
+        url.hash = "";
+        if (pairingCode) url.searchParams.set("pair", pairingCode);
+        return url.href;
+      } catch {
+        return null;
+      }
+    }
+
+    function safeApprovalUrl(value) {
+      if (typeof value !== "string" || !value) return null;
+      try {
+        const url = new URL(value);
+        if (url.protocol !== "https:" || url.username || url.password) return null;
+        return url.href;
+      } catch {
+        return null;
+      }
+    }
+
+    function connectionUrl(pairing, status, endpoint) {
+      const approval = safeApprovalUrl(pairing?.approvalUrl || status?.approvalUrl);
+      if (approval) return approval;
+      const code = pairing?.pairingCode || status?.pairingCode || null;
+      return cloudSetupUrl(endpoint, code);
+    }
+
+    function isTerminalPairingState(state) {
+      return ["paired", "expired", "revoked", "error"].includes(state);
+    }
+
+    function createPairingPoller(check, onResult, onError, timers, intervalMs = 3000) {
+      let stopped = false;
+      let running = false;
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        timers.clearInterval(timer);
+      };
+      const tick = async () => {
+        if (stopped || running) return;
+        running = true;
+        try {
+          const result = await check();
+          if (stopped) return;
+          onResult(result);
+          if (isTerminalPairingState(result?.state)) stop();
+        } catch (error) {
+          if (!stopped) onError(error);
+        } finally {
+          running = false;
+        }
+      };
+      const timer = timers.setInterval(() => { void tick(); }, intervalMs);
+      return { tick, stop };
+    }
+
+    async function restorePairingConnection(actions) {
+      const credential = await actions.describeCredential();
+      if (!credential.configured) {
+        return { credential, pairing: { ok: true, state: "unpaired" } };
+      }
+      const pairing = await actions.pairingStatus();
+      return { credential, pairing };
+    }
+
     function stateDot(value) {
       if (["loaded", "configured", "online", "native", "paired"].includes(value)) return "done";
-      if (["detecting", "pending"].includes(value)) return "ongoing";
+      if (["detecting", "connecting", "pending"].includes(value)) return "ongoing";
       if (["paused", "headless", "untested", "unknown", "unpaired"].includes(value)) return "warning";
-      if (["offline", "unauthenticated", "unconfigured", "error"].includes(value)) return "error";
+      if (["offline", "unauthenticated", "unconfigured", "error", "expired", "revoked"].includes(value)) return "error";
       return "idle";
     }
 
@@ -290,14 +333,6 @@ window.__ModuleLoader__.load({
         });
       }, [workspaceSnapshot?.phase, workspaceKey]);
 
-      const refreshCredential = async () => {
-        try {
-          setCredential(await actions.describeCredential());
-        } catch (error) {
-          setCredential(undefined);
-          setTokenMessage(error instanceof Error ? error.message : "Credential 读取失败");
-        }
-      };
       const refreshStatus = async () => {
         try {
           setStatus(await actions.status());
@@ -309,9 +344,35 @@ window.__ModuleLoader__.load({
           setStatusMessage(error instanceof Error ? error.message : "Host Remote 不可用");
         }
       };
+
+      const refreshCredential = async () => {
+        try {
+          const next = await actions.describeCredential();
+          setCredential(next);
+          return next;
+        } catch (error) {
+          setCredential(undefined);
+          setTokenMessage(error instanceof Error ? error.message : "Credential 读取失败");
+          throw error;
+        }
+      };
+
+      const restoreConnection = async () => {
+        try {
+          const restored = await restorePairingConnection(actions);
+          setCredential(restored.credential);
+          setPairing(restored.pairing);
+          if (!restored.pairing.ok && restored.pairing.state !== "unpaired") {
+            setPairingMessage(restored.pairing.message || "无法恢复连接状态");
+          }
+        } catch (error) {
+          setPairingMessage(error instanceof Error ? error.message : "无法恢复连接状态");
+        }
+      };
+
       useEffect(() => {
-        void refreshCredential();
         void refreshStatus();
+        void restoreConnection();
         const timer = window.setInterval(() => { void refreshStatus(); }, 5000);
         return () => window.clearInterval(timer);
       }, []);
@@ -321,7 +382,10 @@ window.__ModuleLoader__.load({
 
       const saveConfig = async () => {
         setSaveMessage("");
-        if (!endpointValid) { setSaveMessage(t("invalidEndpoint")); return false; }
+        if (!endpointValid) {
+          setSaveMessage(t("invalidEndpoint"));
+          return false;
+        }
         const number = (value) => Number.parseInt(value, 10);
         const operations = [
           ["endpoint", draft.endpoint.trim()],
@@ -334,16 +398,104 @@ window.__ModuleLoader__.load({
           ["trustedWorkspaceMode", draft.trustedWorkspaceMode],
           ["enableHeadlessFallback", draft.enableHeadlessFallback],
         ].map(([field, value]) => ({ op: "set", path: [field], value }));
+
         setSaving(true);
         try {
           const ok = await form.mutate(operations, form.state.revision);
           setSaveMessage(ok ? t("saved") : t("saveFailed"));
           if (ok) await refreshStatus();
           return ok;
+        } catch {
+          setSaveMessage(t("saveFailed"));
+          return false;
         } finally {
           setSaving(false);
         }
       };
+
+      const openConnectionPage = () => {
+        const target = connectionUrl(pairing, status, draft.endpoint.trim());
+        if (!target) {
+          setPairingMessage("Cloud 未提供可用的 HTTPS 连接页面。");
+          return false;
+        }
+        window.open(target, "_blank", "noopener,noreferrer");
+        return true;
+      };
+
+      const connectPairing = async () => {
+        setPairingBusy(true);
+        setPairingMessage("");
+        try {
+          if (authorizedWorkspaceIds.length === 0) {
+            setPairingMessage(t("workspaceRequired"));
+            return;
+          }
+          const saved = await saveConfig();
+          if (!saved) return;
+          const result = await actions.beginPairing();
+          setPairing(result);
+          if (!result.ok) {
+            setPairingMessage(result.message || "连接失败");
+            return;
+          }
+          const target = connectionUrl(result, status, draft.endpoint.trim());
+          if (!target) {
+            setPairingMessage("Cloud 未提供可用的 HTTPS 连接页面。");
+            return;
+          }
+          window.open(target, "_blank", "noopener,noreferrer");
+        } catch (error) {
+          setPairing({ ok: false, state: "error" });
+          setPairingMessage(error instanceof Error ? error.message : "连接失败");
+        } finally {
+          setPairingBusy(false);
+        }
+      };
+
+      const checkPairing = async () => {
+        setPairingMessage("");
+        try {
+          const result = await actions.pairingStatus();
+          setPairing(result);
+          if (!result.ok) setPairingMessage(result.message || "无法检查连接状态");
+          if (result.state === "paired") await refreshStatus();
+        } catch (error) {
+          setPairingMessage(error instanceof Error ? error.message : "无法检查连接状态");
+        }
+      };
+
+      const disconnectPairing = async () => {
+        setPairingBusy(true);
+        setPairingMessage("");
+        try {
+          const result = await actions.disconnectPairing();
+          setPairing(result);
+          if (!result.ok) setPairingMessage(result.message || "断开连接失败");
+          await refreshCredential().catch(() => undefined);
+          await refreshStatus();
+        } catch (error) {
+          setPairingMessage(error instanceof Error ? error.message : "断开连接失败");
+        } finally {
+          setPairingBusy(false);
+        }
+      };
+
+      useEffect(() => {
+        if (pairing?.state !== "pending") return undefined;
+        const poller = createPairingPoller(
+          () => actions.pairingStatus(),
+          (result) => {
+            setPairing(result);
+            if (!result.ok) setPairingMessage(result.message || "无法检查连接状态");
+            if (result.state === "paired") void refreshStatus();
+          },
+          (error) => setPairingMessage(error instanceof Error ? error.message : "无法检查连接状态"),
+          window,
+          3000,
+        );
+        return () => poller.stop();
+      }, [pairing?.state]);
 
       const storeToken = async (value) => {
         if (!value) return;
@@ -373,53 +525,6 @@ window.__ModuleLoader__.load({
           setTokenMessage(error instanceof Error ? error.message : "Host Remote 不可用");
         }
       };
-
-      const connectPairing = async () => {
-        setPairingBusy(true);
-        setPairingMessage("");
-        try {
-          const saved = await saveConfig();
-          if (!saved) return;
-          const result = await actions.beginPairing();
-          setPairing(result);
-          if (!result.ok) { setPairingMessage(result.message || "配对失败"); return; }
-          if (result.approvalUrl) window.open(result.approvalUrl, "_blank", "noopener,noreferrer");
-        } catch (error) {
-          setPairingMessage(error instanceof Error ? error.message : "配对失败");
-        } finally { setPairingBusy(false); }
-      };
-
-      const checkPairing = async () => {
-        setPairingMessage("");
-        try {
-          const result = await actions.pairingStatus();
-          setPairing(result);
-          if (!result.ok) setPairingMessage(result.message || "无法检查配对状态");
-          if (result.state === "paired") await refreshStatus();
-        } catch (error) {
-          setPairingMessage(error instanceof Error ? error.message : "无法检查配对状态");
-        }
-      };
-
-      const disconnectPairing = async () => {
-        setPairingBusy(true);
-        setPairingMessage("");
-        try {
-          const result = await actions.disconnectPairing();
-          setPairing(result);
-          if (!result.ok) setPairingMessage(result.message || "断开配对失败");
-          await refreshCredential();
-          await refreshStatus();
-        } catch (error) {
-          setPairingMessage(error instanceof Error ? error.message : "断开配对失败");
-        } finally { setPairingBusy(false); }
-      };
-
-      useEffect(() => {
-        if (pairing?.state !== "pending") return undefined;
-        const timer = window.setInterval(() => { void checkPairing(); }, 3000);
-        return () => window.clearInterval(timer);
-      }, [pairing?.state]);
 
       const test = async () => {
         setTesting(true);
@@ -451,105 +556,64 @@ window.__ModuleLoader__.load({
         : executionValue === "headless" ? t("headless")
           : executionValue === "detecting" ? t("detecting") : t("unknown");
 
+      const rawPairingState = pairing?.state || status?.pairing || "unpaired";
+      const connectionState = pairingBusy
+        ? "connecting"
+        : rawPairingState === "paired" ? "paired"
+          : rawPairingState === "pending" ? "pending"
+            : rawPairingState === "unpaired" ? "unpaired" : "failed";
+      const connectionLabel = connectionState === "paired"
+        ? t("connectionPaired")
+        : connectionState === "pending" ? t("connectionPending")
+          : connectionState === "connecting" ? t("connectionConnecting")
+            : connectionState === "failed" ? t("connectionFailed") : t("connectionUnpaired");
+
       return h("div", { style: { display: "grid", gap: 16, maxWidth: 920 } },
         h("section", { style: sectionStyle },
-          h("h3", { style: { margin: 0 } }, t("cloud")),
+          h("h3", { style: { margin: 0 } }, t("deviceConnection")),
+          h("p", { style: mutedStyle }, t("connectionHint")),
+          h("div", { style: { ...rowStyle, fontSize: 16 } },
+            h(StateDot, { state: stateDot(connectionState) }),
+            h("strong", null, connectionLabel),
+          ),
           h("div", { style: rowStyle },
-            h(Field, { label: t("endpoint") }, h(Input, {
-              value: draft.endpoint,
-              onChange: (event) => setDraft((value) => ({ ...value, endpoint: event.target.value })),
-              spellCheck: false,
-            })),
-            h(Field, { label: t("workerId") }, h(Input, {
-              value: draft.workerId,
-              onChange: (event) => setDraft((value) => ({ ...value, workerId: event.target.value })),
-              spellCheck: false,
-            })),
+            connectionState === "paired"
+              ? h(React.Fragment, null,
+                  h(Button, { variant: "primary", onClick: openConnectionPage }, t("openChatGPT")),
+                  h(Button, { variant: "outline", disabled: pairingBusy, onClick: () => void disconnectPairing() }, t("disconnect")),
+                )
+              : connectionState === "pending"
+                ? h(React.Fragment, null,
+                    h(Button, { variant: "primary", onClick: openConnectionPage }, t("openConnection")),
+                    h(Button, { variant: "outline", disabled: pairingBusy, onClick: () => void checkPairing() }, t("checkStatus")),
+                  )
+                : h(Button, {
+                    variant: "primary",
+                    disabled: pairingBusy || !canWrite || !endpointValid,
+                    onClick: () => void connectPairing(),
+                  }, pairingBusy ? t("connecting") : t("installConnect")),
           ),
+          pairingMessage ? h("p", { role: "status", style: mutedStyle }, pairingMessage) : null,
           h("div", { style: gridStyle },
-            h("strong", null, t("pairing")),
-            h("p", { style: mutedStyle }, t("pairHint")),
-            h("div", { style: rowStyle },
-              h(StateDot, { state: stateDot(pairing?.state || status?.pairing || "unpaired") }),
-              h("span", null,
-                (pairing?.state || status?.pairing) === "paired" ? t("pairPaired")
-                  : (pairing?.state || status?.pairing) === "pending" ? t("pairPending")
-                    : (pairing?.state || status?.pairing) === "unpaired" ? t("pairUnpaired") : t("pairUnknown")),
+            h(StatusLine, {
+              label: t("cloudStatus"),
+              value: status?.cloud || "untested",
+              display: t(status?.cloud || "untested"),
+            }),
+            h(StatusLine, {
+              label: t("harness"),
+              value: executionValue,
+              display: executionDisplay,
+            }),
+            h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+              h("span", null, t("workspacesAuthorized")),
+              h("strong", null, String(authorizedWorkspaceIds.length)),
             ),
-            (pairing?.pairingCode || status?.pairingCode)
-              ? h("div", { style: gridStyle },
-                  h("span", null, t("pairCode")),
-                  h("code", { style: { fontSize: 18, userSelect: "all" } }, pairing?.pairingCode || status?.pairingCode),
-                ) : null,
-            h("div", { style: rowStyle },
-              (pairing?.state || status?.pairing) === "paired"
-                ? h(Button, { variant: "outline", disabled: pairingBusy, onClick: () => void disconnectPairing() }, t("pairDisconnect"))
-                : h(Button, { variant: "primary", disabled: pairingBusy || !canWrite || !endpointValid, onClick: () => void connectPairing() }, pairingBusy ? t("pairConnecting") : t("pairConnect")),
-              (pairing?.state || status?.pairing) === "pending"
-                ? h(Button, { variant: "outline", onClick: () => void checkPairing() }, t("pairCheck")) : null,
-              (pairing?.approvalUrl || status?.approvalUrl)
-                ? h(Button, { variant: "outline", onClick: () => window.open(pairing?.approvalUrl || status?.approvalUrl, "_blank", "noopener,noreferrer") }, t("pairOpen")) : null,
-            ),
-            pairingMessage ? h("p", { role: "status", style: mutedStyle }, pairingMessage) : null,
-          ),
-          h("details", null,
-            h("summary", { style: { cursor: "pointer" } }, t("legacyToken")),
-            h("div", { style: { ...gridStyle, marginTop: 12 } },
-              h("div", { style: rowStyle },
-                h(StateDot, { state: credential?.configured ? "done" : "warning" }),
-                h("span", null, credential?.configured ? t("configured") : t("unconfigured")),
-              ),
-              h("div", { style: rowStyle },
-                h(Input, {
-                  type: "password", value: tokenInput,
-                  onChange: (event) => setTokenInput(event.target.value),
-                  placeholder: t("setToken"), autoComplete: "new-password",
-                  style: { minWidth: 320 },
-                }),
-                h(Button, { variant: "outline", disabled: !credential?.writable || !tokenInput, onClick: () => void storeToken(tokenInput) }, t("saveToken")),
-                h(Button, { variant: "outline", onClick: () => void generate() }, t("generateToken")),
-              ),
-              generatedToken ? h("div", { style: gridStyle },
-                h("code", { style: { overflowWrap: "anywhere", userSelect: "all" } }, generatedToken),
-                h("p", { style: mutedStyle }, t("tokenSiteHint")),
-              ) : null,
-              h("p", { style: mutedStyle }, t("tokenHint")),
-              tokenMessage ? h("p", { role: "status", style: mutedStyle }, tokenMessage) : null,
+            h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+              h("span", null, t("heartbeat")),
+              h("span", null, status?.lastHeartbeat || t("noHeartbeat")),
             ),
           ),
-        ),
-
-        h("section", { style: sectionStyle },
-          h("h3", { style: { margin: 0 } }, t("status")),
-          h(StatusLine, { label: t("connector"), value: status?.connector || "loaded", display: t("loaded") }),
-          h(StatusLine, { label: t("harness"), value: executionValue, display: executionDisplay }),
-          h(StatusLine, {
-            label: t("credential"),
-            value: credential?.configured ? "configured" : "unconfigured",
-            display: credential?.configured ? t("configured") : t("unconfigured"),
-          }),
-          h(StatusLine, {
-            label: t("pairing"),
-            value: status?.pairing || "unpaired",
-            display: status?.pairing === "paired" ? t("pairPaired") : status?.pairing === "pending" ? t("pairPending") : status?.pairing === "unpaired" ? t("pairUnpaired") : t("pairUnknown"),
-          }),
-          h(StatusLine, {
-            label: t("cloudStatus"),
-            value: status?.cloud || "untested",
-            display: t(status?.cloud || "untested"),
-          }),
-          h(StatusLine, {
-            label: t("worker"),
-            value: status?.worker || "paused",
-            display: status?.worker || t("paused"),
-          }),
-          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
-            h("span", null, t("heartbeat")),
-            h("span", null, status?.lastHeartbeat || t("noHeartbeat")),
-          ),
-          status?.missingWorkspaceIds?.length
-            ? h("p", { role: "alert", style: mutedStyle }, t("workspaceMissingStatus")) : null,
-          status?.lastError ? h("p", { style: mutedStyle }, status.lastError) : null,
           statusMessage ? h("p", { role: "alert", style: mutedStyle }, statusMessage) : null,
         ),
 
@@ -582,11 +646,6 @@ window.__ModuleLoader__.load({
                     );
                   }),
                 ),
-          workspaceMessage ? h("p", { role: "status", style: mutedStyle }, workspaceMessage) : null,
-        ),
-
-        h("section", { style: sectionStyle },
-          h("h3", { style: { margin: 0 } }, t("permissionMode")),
           h("div", { style: rowStyle },
             h(Switch, {
               checked: draft.trustedWorkspaceMode,
@@ -596,52 +655,117 @@ window.__ModuleLoader__.load({
             h("strong", null, t("trustedMode")),
           ),
           h("p", { style: mutedStyle }, draft.trustedWorkspaceMode ? t("trustedHint") : t("restrictedHint")),
+          workspaceMessage ? h("p", { role: "status", style: mutedStyle }, workspaceMessage) : null,
         ),
 
-        h("section", { style: sectionStyle },
-          h("h3", { style: { margin: 0 } }, t("advanced")),
-          h("div", { style: rowStyle },
-            h(Field, { label: t("poll") }, h(Input, {
-              type: "number", min: 1000, max: 60000, value: draft.pollIntervalMs,
-              onChange: (event) => setDraft((value) => ({ ...value, pollIntervalMs: event.target.value })),
-            })),
-            h(Field, { label: t("heartbeatInterval") }, h(Input, {
-              type: "number", min: 5000, max: 300000, value: draft.heartbeatIntervalMs,
-              onChange: (event) => setDraft((value) => ({ ...value, heartbeatIntervalMs: event.target.value })),
-            })),
-            h(Field, { label: t("lease") }, h(Input, {
-              type: "number", min: 5000, max: 55000, value: draft.leaseRenewIntervalMs,
-              onChange: (event) => setDraft((value) => ({ ...value, leaseRenewIntervalMs: event.target.value })),
-            })),
-            h(Field, { label: t("leaseWait") }, h(Input, {
-              type: "number", min: 10000, max: 86400000, value: draft.leaseWaitTimeoutMs,
-              onChange: (event) => setDraft((value) => ({ ...value, leaseWaitTimeoutMs: event.target.value })),
-            })),
-          ),
-          h("div", { style: rowStyle },
-            h(Switch, {
-              checked: draft.enableHeadlessFallback,
-              label: t("fallback"),
-              onChange: (next) => setDraft((value) => ({ ...value, enableHeadlessFallback: next })),
+        h("details", { style: sectionStyle },
+          h("summary", { style: { cursor: "pointer", fontWeight: 600 } }, t("advanced")),
+          h("div", { style: { ...gridStyle, marginTop: 12 } },
+            h("div", { style: rowStyle },
+              h(Field, { label: t("endpoint") }, h(Input, {
+                value: draft.endpoint,
+                onChange: (event) => setDraft((value) => ({ ...value, endpoint: event.target.value })),
+                spellCheck: false,
+              })),
+              h(Field, { label: t("workerId") }, h(Input, {
+                value: draft.workerId,
+                onChange: (event) => setDraft((value) => ({ ...value, workerId: event.target.value })),
+                spellCheck: false,
+              })),
+            ),
+
+            h("div", { style: gridStyle },
+              h("strong", null, t("token")),
+              h("div", { style: rowStyle },
+                h(StateDot, { state: credential?.configured ? "done" : "warning" }),
+                h("span", null, credential?.configured ? t("configured") : t("unconfigured")),
+              ),
+              h("div", { style: rowStyle },
+                h(Input, {
+                  type: "password",
+                  value: tokenInput,
+                  onChange: (event) => setTokenInput(event.target.value),
+                  placeholder: t("setToken"),
+                  autoComplete: "new-password",
+                  style: { minWidth: 320 },
+                }),
+                h(Button, {
+                  variant: "outline",
+                  disabled: !credential?.writable || !tokenInput,
+                  onClick: () => void storeToken(tokenInput),
+                }, t("saveToken")),
+                h(Button, { variant: "outline", onClick: () => void generate() }, t("generateToken")),
+              ),
+              generatedToken ? h("div", { style: gridStyle },
+                h("strong", null, t("generatedToken")),
+                h("code", { style: { overflowWrap: "anywhere", userSelect: "all" } }, generatedToken),
+                h(Button, {
+                  variant: "outline",
+                  disabled: !credential?.writable,
+                  onClick: () => void storeToken(generatedToken),
+                }, t("saveToken")),
+              ) : null,
+              h("p", { style: mutedStyle }, t("tokenHint")),
+              tokenMessage ? h("p", { role: "status", style: mutedStyle }, tokenMessage) : null,
+            ),
+
+            (pairing?.pairingCode || status?.pairingCode)
+              ? h("div", { style: gridStyle },
+                  h("strong", null, t("pairingCode")),
+                  h("code", null, pairing?.pairingCode || status?.pairingCode),
+                ) : null,
+
+            h(StatusLine, { label: t("connector"), value: status?.connector || "loaded", display: status?.connector || "loaded" }),
+            h(StatusLine, {
+              label: t("credential"),
+              value: credential?.configured ? "configured" : "unconfigured",
+              display: credential?.configured ? t("configured") : t("unconfigured"),
             }),
-            h("span", null, t("fallback")),
-          ),
-        ),
+            h(StatusLine, { label: t("worker"), value: status?.worker || "paused", display: status?.worker || "paused" }),
 
-        h("div", { style: rowStyle },
-          h(Button, {
-            variant: "primary",
-            disabled: saving || !canWrite || !endpointValid,
-            onClick: () => void saveConfig(),
-          }, saving ? t("saving") : t("saveConfig")),
-          h(Button, {
-            variant: "outline",
-            disabled: testing || saving || !canWrite || !endpointValid,
-            onClick: () => void test(),
-          }, testing ? t("testing") : t("test")),
-          saveMessage ? h("span", { role: "status", style: mutedStyle }, saveMessage) : null,
-          testResult ? h("span", { role: "status", style: mutedStyle },
-            `${testResult.ok ? "✓" : "⚠"} ${testResult.message}`) : null,
+            h("div", { style: rowStyle },
+              h(Field, { label: t("poll") }, h(Input, {
+                type: "number", min: 1000, max: 60000, value: draft.pollIntervalMs,
+                onChange: (event) => setDraft((value) => ({ ...value, pollIntervalMs: event.target.value })),
+              })),
+              h(Field, { label: t("heartbeatInterval") }, h(Input, {
+                type: "number", min: 5000, max: 300000, value: draft.heartbeatIntervalMs,
+                onChange: (event) => setDraft((value) => ({ ...value, heartbeatIntervalMs: event.target.value })),
+              })),
+              h(Field, { label: t("lease") }, h(Input, {
+                type: "number", min: 5000, max: 55000, value: draft.leaseRenewIntervalMs,
+                onChange: (event) => setDraft((value) => ({ ...value, leaseRenewIntervalMs: event.target.value })),
+              })),
+              h(Field, { label: t("leaseWait") }, h(Input, {
+                type: "number", min: 10000, max: 86400000, value: draft.leaseWaitTimeoutMs,
+                onChange: (event) => setDraft((value) => ({ ...value, leaseWaitTimeoutMs: event.target.value })),
+              })),
+            ),
+            h("div", { style: rowStyle },
+              h(Switch, {
+                checked: draft.enableHeadlessFallback,
+                label: t("fallback"),
+                onChange: (next) => setDraft((value) => ({ ...value, enableHeadlessFallback: next })),
+              }),
+              h("span", null, t("fallback")),
+            ),
+
+            h("div", { style: rowStyle },
+              h(Button, {
+                variant: "primary",
+                disabled: saving || !canWrite || !endpointValid,
+                onClick: () => void saveConfig(),
+              }, saving ? t("saving") : t("saveConfig")),
+              h(Button, {
+                variant: "outline",
+                disabled: testing || saving || !canWrite || !endpointValid,
+                onClick: () => void test(),
+              }, testing ? t("testing") : t("test")),
+              saveMessage ? h("span", { role: "status", style: mutedStyle }, saveMessage) : null,
+              testResult ? h("span", { role: "status", style: mutedStyle },
+                `${testResult.ok ? "✓" : "⚠"} ${testResult.message}`) : null,
+            ),
+          ),
         ),
       );
     }
@@ -698,11 +822,17 @@ window.__ModuleLoader__.load({
         key: ROW_KEY,
         locale: NS,
         inject: () => ({ actions }),
-      }, (props) => props.view === "summary" ? props.t("summary") : h(ConfigPage, props)));
+      }, (slotProps) => slotProps.view === "summary" ? slotProps.t("summary") : h(ConfigPage, slotProps)));
     }
 
     return {
       inject: ["remote"],
+      __test: {
+        cloudSetupUrl,
+        connectionUrl,
+        createPairingPoller,
+        restorePairingConnection,
+      },
       async apply(ctx) {
         const disposeRemote = await ctx.remote.$mount(contribution);
         const ui = ctx.inject([

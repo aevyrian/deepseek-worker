@@ -11,9 +11,10 @@ async function loadClientPlugin() {
       load(value) { definition = value; },
     },
   };
-  vm.runInNewContext(source, { window, console, setInterval, clearInterval });
+  vm.runInNewContext(source, { window, console, setInterval, clearInterval, URL });
   assert.ok(definition);
   const React = {
+    Fragment: Symbol("Fragment"),
     createElement: (...args) => ({ args }),
     useEffect() {},
     useState(value) { return [typeof value === "function" ? value() : value, () => {}]; },
@@ -30,7 +31,36 @@ async function loadClientPlugin() {
   return { source, exports };
 }
 
-async function mountClient({ remoteNamespace, credentials }) {
+function goodRemoteNamespace() {
+  return {
+    async status() { return { ok: true, value: { execution: "native", pairing: "unpaired" } }; },
+    async generateToken() { return { ok: true, value: { token: "generated-once" } }; },
+    async test() { return { ok: true, value: { ok: true, message: "connected" } }; },
+    async beginPairing() {
+      return {
+        ok: true,
+        value: {
+          ok: true,
+          state: "pending",
+          pairingCode: "PAIR-1234",
+          approvalUrl: "https://deepseek-worker.sxfdgan.chatgpt.site/setup?pair=PAIR-1234",
+        },
+      };
+    },
+    async pairingStatus() { return { ok: true, value: { ok: true, state: "pending" } }; },
+    async disconnectPairing() { return { ok: true, value: { ok: true, state: "unpaired" } }; },
+  };
+}
+
+async function mountClient({
+  remoteNamespace = goodRemoteNamespace(),
+  credentials = {
+    async describe() {
+      return { ok: true, value: { LOCAL_WORKER_TOKEN: { configured: true, source: "file", writable: true } } };
+    },
+    async set() { return { ok: true, value: undefined }; },
+  },
+} = {}) {
   const { exports } = await loadClientPlugin();
   let mounted = false;
   let remoteDisposed = false;
@@ -93,6 +123,7 @@ async function mountClient({ remoteNamespace, credentials }) {
 
   const dispose = await exports.apply(root);
   return {
+    exports,
     actions: slotOptions.inject().actions,
     injected,
     slotOptions,
@@ -105,28 +136,19 @@ async function mountClient({ remoteNamespace, credentials }) {
   };
 }
 
-test("Client mounts Remote first, then injects its namespace into the UI fiber", async () => {
-  const mounted = await mountClient({
-    remoteNamespace: {
-      async status() { return { ok: true, value: { execution: "native" } }; },
-      async generateToken() { return { ok: true, value: { token: "generated-once" } }; },
-      async test() { return { ok: true, value: { ok: true, message: "connected" } }; },
-    },
-    credentials: {
-      async describe() {
-        return { ok: true, value: { LOCAL_WORKER_TOKEN: { configured: true, writable: true } } };
-      },
-      async set() { return { ok: true, value: undefined }; },
-    },
-  });
+test("Client mounts all Connector Remotes and keeps manual Token compatibility", async () => {
+  const mounted = await mountClient();
 
   assert.ok(mounted.injected.includes("remote.deepseekWorkerConnector"));
   assert.equal(mounted.slotOptions.key, "deepseek-worker-connector#deepseek-worker-connector");
   assert.equal((await mounted.actions.status()).execution, "native");
   assert.equal(await mounted.actions.generateToken(), "generated-once");
   assert.equal((await mounted.actions.test()).ok, true);
+  assert.equal((await mounted.actions.beginPairing()).state, "pending");
+  assert.equal((await mounted.actions.pairingStatus()).state, "pending");
+  assert.equal((await mounted.actions.disconnectPairing()).state, "unpaired");
   assert.equal((await mounted.actions.describeCredential()).configured, true);
-  assert.equal(await mounted.actions.storeCredential("local-test-token"), true);
+  assert.equal(await mounted.actions.storeCredential("manual-compatibility-token"), true);
   assert.equal(mounted.actions.getWorkspacesSnapshot().items[0].workspaceId, "workspace-a");
   assert.equal(typeof mounted.slotRenderer, "function");
 
@@ -136,52 +158,36 @@ test("Client mounts Remote first, then injects its namespace into the UI fiber",
   assert.equal(disposed.mounted, false);
 });
 
-test("Host Remote failures are actionable and never echo an arbitrary server message", async () => {
+test("Host Remote failures remain actionable for pairing methods", async () => {
   const leaked = "do-not-display-this-server-text";
-  const mounted = await mountClient({
-    remoteNamespace: {
-      async status() {
-        return { ok: false, error: { code: "gateway/service-unavailable", message: leaked } };
-      },
-      async generateToken() {
-        return { ok: false, error: { code: "gateway/invocation-unavailable", message: leaked } };
-      },
-      async test() {
-        return { ok: false, error: { code: "gateway/method-unavailable", message: leaked } };
-      },
-    },
-    credentials: {
-      async describe() {
-        return { ok: true, value: { LOCAL_WORKER_TOKEN: { configured: false, writable: true } } };
-      },
-      async set() { return { ok: true, value: undefined }; },
-    },
-  });
+  const failing = {};
+  for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"]) {
+    failing[method] = async () => ({
+      ok: false,
+      error: { code: "gateway/service-unavailable", message: leaked },
+    });
+  }
+  const mounted = await mountClient({ remoteNamespace: failing });
 
-  await assert.rejects(() => mounted.actions.status(), /Host Remote 不可用.*gateway\/service-unavailable/);
-  await assert.rejects(() => mounted.actions.generateToken(), /Host Remote 不可用.*gateway\/invocation-unavailable/);
-  await assert.rejects(() => mounted.actions.test(), /Gateway service unavailable.*gateway\/method-unavailable/);
-
-  for (const action of [
-    mounted.actions.status(),
-    mounted.actions.generateToken(),
-    mounted.actions.test(),
+  for (const [name, invoke] of [
+    ["status", () => mounted.actions.status()],
+    ["generateToken", () => mounted.actions.generateToken()],
+    ["test", () => mounted.actions.test()],
+    ["beginPairing", () => mounted.actions.beginPairing()],
+    ["pairingStatus", () => mounted.actions.pairingStatus()],
+    ["disconnectPairing", () => mounted.actions.disconnectPairing()],
   ]) {
-    const error = await action.catch((value) => value);
-    assert.equal(String(error?.message || error).includes(leaked), false);
+    const error = await invoke().catch((value) => value);
+    assert.match(error.message, new RegExp(`Host Remote 不可用.*${name}`));
+    assert.equal(error.message.includes(leaked), false);
   }
 
   await mounted.dispose();
 });
 
-test("Credential describe/set errors are differentiated and never echo the Token", async () => {
+test("Credential describe/set errors are differentiated and never echo a Token", async () => {
   const token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const mounted = await mountClient({
-    remoteNamespace: {
-      async status() { return { ok: true, value: { execution: "native" } }; },
-      async generateToken() { return { ok: true, value: { token: "generated-once" } }; },
-      async test() { return { ok: true, value: { ok: true, message: "connected" } }; },
-    },
     credentials: {
       async describe() {
         return { ok: false, error: { code: "gateway/internal", message: "provider absent" } };
@@ -203,7 +209,133 @@ test("Credential describe/set errors are differentiated and never echo the Token
   await mounted.dispose();
 });
 
-test("status failure renders Unknown/Detecting logic instead of defaulting to Headless", async () => {
+test("Browser pairing poller checks every 3 seconds and stops after pending becomes paired", async () => {
+  const { exports } = await loadClientPlugin();
+  const callbacks = [];
+  let intervalMs;
+  let cleared = false;
+  const timers = {
+    setInterval(callback, ms) {
+      callbacks.push(callback);
+      intervalMs = ms;
+      return 41;
+    },
+    clearInterval(id) {
+      assert.equal(id, 41);
+      cleared = true;
+    },
+  };
+  const states = [
+    { ok: true, state: "pending" },
+    { ok: true, state: "paired" },
+  ];
+  const seen = [];
+  const poller = exports.__test.createPairingPoller(
+    async () => states.shift(),
+    (result) => seen.push(result.state),
+    (error) => { throw error; },
+    timers,
+  );
+
+  assert.equal(intervalMs, 3000);
+  await poller.tick();
+  assert.deepEqual(seen, ["pending"]);
+  assert.equal(cleared, false);
+  await poller.tick();
+  assert.deepEqual(seen, ["pending", "paired"]);
+  assert.equal(cleared, true);
+});
+
+test("page reopen restores pending pairing when a local Credential exists", async () => {
+  const { exports } = await loadClientPlugin();
+  let statusCalls = 0;
+  const restored = await exports.__test.restorePairingConnection({
+    async describeCredential() {
+      return { configured: true, source: "file", writable: true };
+    },
+    async pairingStatus() {
+      statusCalls += 1;
+      return {
+        ok: true,
+        state: "pending",
+        pairingCode: "PAIR-1234",
+        approvalUrl: "https://deepseek-worker.sxfdgan.chatgpt.site/setup?pair=PAIR-1234",
+      };
+    },
+  });
+
+  assert.equal(statusCalls, 1);
+  assert.equal(restored.credential.configured, true);
+  assert.equal(restored.pairing.state, "pending");
+});
+
+test("page reopen recognizes an already paired device", async () => {
+  const { exports } = await loadClientPlugin();
+  const restored = await exports.__test.restorePairingConnection({
+    async describeCredential() {
+      return { configured: true, source: "file", writable: true };
+    },
+    async pairingStatus() {
+      return { ok: true, state: "paired" };
+    },
+  });
+  assert.equal(restored.pairing.state, "paired");
+});
+
+test("page reopen does not call pairingStatus when no Credential exists", async () => {
+  const { exports } = await loadClientPlugin();
+  let statusCalls = 0;
+  const restored = await exports.__test.restorePairingConnection({
+    async describeCredential() {
+      return { configured: false, writable: true };
+    },
+    async pairingStatus() {
+      statusCalls += 1;
+      return { ok: true, state: "paired" };
+    },
+  });
+  assert.equal(statusCalls, 0);
+  assert.equal(restored.pairing.state, "unpaired");
+});
+
+test("connection URLs contain only Cloud setup/pairing data and never a Worker Token", async () => {
+  const { exports } = await loadClientPlugin();
+  const token = "f".repeat(64);
+  const endpoint = "https://deepseek-worker.sxfdgan.chatgpt.site/api/worker";
+  const url = exports.__test.connectionUrl(
+    { state: "pending", pairingCode: "PAIR-1234" },
+    undefined,
+    endpoint,
+  );
+  assert.equal(url, "https://deepseek-worker.sxfdgan.chatgpt.site/setup?pair=PAIR-1234");
+  assert.equal(url.includes(token), false);
+  assert.equal(url.includes("LOCAL_WORKER_TOKEN"), false);
+});
+
+test("normal UI is connection-first; Token controls are inside Advanced diagnostics", async () => {
+  const { source } = await loadClientPlugin();
+  assert.match(source, /设备连接/);
+  assert.match(source, /安装并连接 ChatGPT/);
+  assert.match(source, /打开连接页面/);
+  assert.match(source, /在 ChatGPT 中打开/);
+  assert.match(source, /高级 \/ 诊断/);
+  assert.doesNotMatch(source, /Site Secret/);
+
+  const advancedRender = source.indexOf('h("details", { style: sectionStyle }');
+  const tokenRender = source.indexOf('h("strong", null, t("token"))');
+  assert.ok(advancedRender >= 0);
+  assert.ok(tokenRender > advancedRender);
+});
+
+test("Browser never persists Worker Token in local/session storage or appends it to URLs", async () => {
+  const { source } = await loadClientPlugin();
+  assert.doesNotMatch(source, /localStorage/);
+  assert.doesNotMatch(source, /sessionStorage/);
+  assert.doesNotMatch(source, /searchParams\.set\(["']token/);
+  assert.doesNotMatch(source, /searchParams\.set\(["']LOCAL_WORKER_TOKEN/);
+});
+
+test("status failure renders Unknown/Detecting instead of defaulting to Headless", async () => {
   const { source } = await loadClientPlugin();
   assert.match(source, /statusFailed \? "unknown" : "detecting"/);
   assert.doesNotMatch(source, /status\?\.execution \|\| "headless"/);
@@ -215,23 +347,4 @@ test("Browser persistence contains WorkspaceIds, not a local path editor", async
   assert.match(source, /ctx\.workspaces\.list\.getSnapshot/);
   assert.doesNotMatch(source, /workspaceAllowlist/);
   assert.doesNotMatch(source, /localPath/);
-});
-
-test("Token UI no longer maps Host Remote failures to generic config-save failure", async () => {
-  const { source } = await loadClientPlugin();
-  assert.match(source, /Host Remote 不可用/);
-  assert.match(source, /Credential provider 不可写/);
-  assert.match(source, /Token 保存失败/);
-  assert.doesNotMatch(source, /catch \{\s*setTokenMessage\(t\("saveFailed"\)\)/);
-});
-
-
-test("0.3.0 exposes one-click pairing without requiring a Site Secret in the normal UI", async () => {
-  const { source } = await loadClientPlugin();
-  assert.match(source, /连接 DeepSeek Worker/);
-  assert.match(source, /beginPairing/);
-  assert.match(source, /pairingStatus/);
-  assert.match(source, /disconnectPairing/);
-  assert.match(source, /Site 后台配置 Secret/);
-  assert.doesNotMatch(source, /同步更新 Site Secret LOCAL_WORKER_TOKEN/);
 });

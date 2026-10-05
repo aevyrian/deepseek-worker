@@ -24,8 +24,11 @@ import {
 } from "./lib/protocol.mjs";
 import {
   classifyPairingError,
+  credentialInfo,
   credentialValue,
   hashWorkerToken,
+  normalizeApprovalUrl,
+  normalizePairingState,
   pairingRequest,
 } from "./lib/pairing.mjs";
 
@@ -63,6 +66,22 @@ function currentSessionController(ctx) {
 
 function currentCredentials(ctx) {
   return optionalService(ctx, "credentials");
+}
+
+async function describeWorkerCredential(credentials) {
+  return credentialInfo(await credentials.describe(TOKEN_REF));
+}
+
+async function resolveWorkerToken(credentials) {
+  return credentialValue(await credentials.resolve(TOKEN_REF));
+}
+
+async function saveWorkerToken(credentials, token) {
+  await credentials.set(TOKEN_REF, token);
+}
+
+async function clearWorkerToken(credentials) {
+  if (typeof credentials.unset === "function") await credentials.unset(TOKEN_REF);
 }
 
 function initialRuntime() {
@@ -119,7 +138,7 @@ export class WorkerControlService extends TypertRemoteService {
     let credentialConfigured = false;
     if (credentials !== undefined) {
       try {
-        credentialConfigured = Boolean(credentialValue(await credentials.resolve(TOKEN_REF)));
+        credentialConfigured = Boolean(await resolveWorkerToken(credentials));
       } catch {}
     }
 
@@ -152,65 +171,279 @@ export class WorkerControlService extends TypertRemoteService {
 
   async beginPairing() {
     let config;
-    try { config = currentConfig(this.input); } catch (error) { return { ok: false, code: "config_invalid", message: redactSecret(error) }; }
-    if (config.authorizedWorkspaceIds.length === 0) return { ok: false, code: "workspace_missing", message: "尚未授权任何 Harness Workspace。" };
-    const workspaces = workspaceState(config, this.ctx.workspaceRegistry);
-    if (workspaces.missing.length > 0) return { ok: false, code: "workspace_not_found", message: `以下授权 Workspace 已不存在：${workspaces.missing.join(", ")}。请重新选择。` };
-    const credentials = currentCredentials(this.ctx);
-    if (credentials === undefined) return { ok: false, code: "credential_unavailable", message: "Harness Credential provider 不可用。" };
     try {
-      const info = await credentials.describe(TOKEN_REF);
-      if (info?.writable === false) return { ok: false, code: "credential_readonly", message: "Harness Credential provider 当前不可写。" };
-    } catch (error) { return { ok: false, code: "credential_error", message: `读取 Credential 状态失败：${redactSecret(error)}` }; }
+      config = currentConfig(this.input);
+    } catch (error) {
+      return { ok: false, code: "config_invalid", state: "error", message: redactSecret(error) };
+    }
+
+    if (config.authorizedWorkspaceIds.length === 0) {
+      return {
+        ok: false,
+        code: "workspace_missing",
+        state: "error",
+        message: "请先选择至少一个 Harness Workspace。",
+      };
+    }
+
+    let workspaces;
+    try {
+      workspaces = workspaceState(config, this.ctx.workspaceRegistry);
+    } catch (error) {
+      return {
+        ok: false,
+        code: "workspace_registry_unavailable",
+        state: "error",
+        message: `读取 Harness Workspace 状态失败：${redactSecret(error)}`,
+      };
+    }
+    if (workspaces.missing.length > 0) {
+      return {
+        ok: false,
+        code: "workspace_not_found",
+        state: "error",
+        message: `以下授权 Workspace 已不存在：${workspaces.missing.join(", ")}。请重新选择。`,
+      };
+    }
+
+    const credentials = currentCredentials(this.ctx);
+    if (credentials === undefined) {
+      return {
+        ok: false,
+        code: "credential_unavailable",
+        state: "error",
+        message: "Harness Credential provider 不可用。",
+      };
+    }
+
+    let info;
+    try {
+      info = await describeWorkerCredential(credentials);
+    } catch (error) {
+      return {
+        ok: false,
+        code: "credential_describe_failed",
+        state: "error",
+        message: `读取 Harness Credential 状态失败：${redactSecret(error)}`,
+      };
+    }
+
+    if (!info.writable) {
+      return {
+        ok: false,
+        code: "credential_readonly",
+        state: "error",
+        message: "Harness Credential provider 当前不可写。",
+      };
+    }
+
     const token = generateWorkerToken();
+
+    try {
+      await saveWorkerToken(credentials, token);
+    } catch (error) {
+      return {
+        ok: false,
+        code: "credential_write_failed",
+        state: "error",
+        message: `保存本机 Worker 凭据失败：${redactSecret(error, token)}`,
+      };
+    }
+
+    this.runtime.credential = "configured";
+    this.runtime.worker = "paused";
+    this.runtime.pairing = "pending";
+    this.runtime.lastError = null;
+
     try {
       const started = await pairingRequest(config, undefined, "start", {
-        token_hash: hashWorkerToken(token), hostname: hostname(),
-        workspace_allowlist: config.authorizedWorkspaceIds, client_version: "0.3.0",
+        token_hash: hashWorkerToken(token),
+        hostname: hostname(),
+        workspace_allowlist: config.authorizedWorkspaceIds,
+        client_version: "0.3.1",
       }, AbortSignal.timeout(10000));
-      await credentials.set(TOKEN_REF, token);
-      this.runtime.credential = "configured"; this.runtime.pairing = "pending";
-      this.runtime.pairingCode = started.code || started.pairing_code || null;
-      this.runtime.approvalUrl = started.approval_url || started.approvalUrl || null;
-      this.runtime.pairingExpiresAt = started.expires_at || started.expiresAt || null;
-      this.runtime.cloud = "online"; this.runtime.worker = "paused"; this.runtime.lastError = null;
-      return { ok: true, code: "pairing_started", state: "pending", pairingCode: this.runtime.pairingCode, approvalUrl: this.runtime.approvalUrl, expiresAt: this.runtime.pairingExpiresAt };
+
+      const state = normalizePairingState(started.state || "pending");
+      const pairingCode = started.code || started.pairing_code || null;
+      const approvalUrl = normalizeApprovalUrl(started.approval_url || started.approvalUrl || null);
+      const expiresAt = started.expires_at || started.expiresAt || null;
+
+      if (!approvalUrl && state === "pending") {
+        this.runtime.pairing = "error";
+        this.runtime.lastError = "Cloud 未返回 approvalUrl。";
+        return {
+          ok: false,
+          code: "pairing_response_invalid",
+          state: "error",
+          message: "Cloud 配对响应缺少连接页面地址。",
+        };
+      }
+
+      this.runtime.pairing = state;
+      this.runtime.pairingCode = pairingCode;
+      this.runtime.approvalUrl = approvalUrl;
+      this.runtime.pairingExpiresAt = expiresAt;
+      this.runtime.cloud = "online";
+      this.runtime.lastError = null;
+
+      return {
+        ok: true,
+        code: "pairing_started",
+        state,
+        pairingCode,
+        approvalUrl,
+        expiresAt,
+      };
     } catch (error) {
-      const mapped = classifyPairingError(error); this.runtime.lastError = mapped.message;
-      return { ok: false, code: mapped.code, message: mapped.message };
+      const mapped = classifyPairingError(error);
+      this.runtime.pairing = mapped.state;
+      this.runtime.lastError = mapped.message;
+      return { ok: false, ...mapped };
     }
   }
 
   async pairingStatus() {
-    const config = currentConfig(this.input); const credentials = currentCredentials(this.ctx);
-    if (credentials === undefined) return { ok: false, code: "credential_unavailable", message: "Harness Credential provider 不可用。" };
-    const token = credentialValue(await credentials.resolve(TOKEN_REF));
-    if (!token) { this.runtime.pairing = "unpaired"; return { ok: false, code: "token_missing", message: "本机尚无 Worker 凭据。" }; }
+    let config;
+    try {
+      config = currentConfig(this.input);
+    } catch (error) {
+      return { ok: false, code: "config_invalid", state: "error", message: redactSecret(error) };
+    }
+
+    const credentials = currentCredentials(this.ctx);
+    if (credentials === undefined) {
+      return {
+        ok: false,
+        code: "credential_unavailable",
+        state: "error",
+        message: "Harness Credential provider 不可用。",
+      };
+    }
+
+    let token;
+    try {
+      token = await resolveWorkerToken(credentials);
+    } catch (error) {
+      return {
+        ok: false,
+        code: "credential_resolve_failed",
+        state: "error",
+        message: `读取 Harness Worker 凭据失败：${redactSecret(error)}`,
+      };
+    }
+
+    if (!token) {
+      this.runtime.pairing = "unpaired";
+      this.runtime.credential = "unconfigured";
+      return { ok: false, code: "token_missing", state: "unpaired", message: "本机尚无 Worker 凭据。" };
+    }
+
     try {
       const result = await pairingRequest(config, token, "status", {}, AbortSignal.timeout(10000));
-      const state = result.state === "active" ? "paired" : (result.state || "unknown"); this.runtime.pairing = state;
+      const state = normalizePairingState(result.state);
+      const pairingCode = result.code || result.pairing_code || this.runtime.pairingCode || null;
+      const rawApprovalUrl = result.approval_url || result.approvalUrl || this.runtime.approvalUrl || null;
+      const approvalUrl = rawApprovalUrl ? normalizeApprovalUrl(rawApprovalUrl) : null;
+      const expiresAt = result.expires_at || result.expiresAt || this.runtime.pairingExpiresAt || null;
+
+      this.runtime.pairing = state;
+      this.runtime.credential = "configured";
+      this.runtime.cloud = "online";
+      this.runtime.pairingCode = pairingCode;
+      this.runtime.approvalUrl = approvalUrl;
+      this.runtime.pairingExpiresAt = expiresAt;
+      this.runtime.lastError = null;
+
       if (state === "paired") {
-        this.runtime.cloud = "online"; this.runtime.worker = config.trustedWorkspaceMode ? "online" : "paused";
-        this.runtime.pairingCode = null; this.runtime.approvalUrl = null; this.runtime.pairingExpiresAt = null; this.runtime.lastError = null;
+        this.runtime.worker = config.trustedWorkspaceMode ? "online" : "paused";
+      } else {
+        this.runtime.worker = "paused";
       }
-      return { ok: true, state, pairingCode: result.code || result.pairing_code || this.runtime.pairingCode, approvalUrl: result.approval_url || result.approvalUrl || this.runtime.approvalUrl, expiresAt: result.expires_at || result.expiresAt || this.runtime.pairingExpiresAt };
+
+      return {
+        ok: true,
+        state,
+        pairingCode,
+        approvalUrl,
+        expiresAt,
+      };
     } catch (error) {
-      const mapped = classifyPairingError(error); if (mapped.code === "pairing_credential_rejected") this.runtime.pairing = "unpaired";
-      return { ok: false, code: mapped.code, message: mapped.message };
+      const mapped = classifyPairingError(error);
+      this.runtime.pairing = mapped.state;
+      this.runtime.worker = "paused";
+      this.runtime.lastError = mapped.message;
+      if (mapped.state === "unpaired") this.runtime.credential = "configured";
+      return { ok: false, ...mapped };
     }
   }
 
   async disconnectPairing() {
-    const config = currentConfig(this.input); const credentials = currentCredentials(this.ctx);
-    if (credentials === undefined) return { ok: false, code: "credential_unavailable", message: "Harness Credential provider 不可用。" };
-    const token = credentialValue(await credentials.resolve(TOKEN_REF));
-    if (!token) return { ok: true, code: "already_disconnected", state: "unpaired" };
+    let config;
     try {
-      await pairingRequest(config, token, "disconnect", {}, AbortSignal.timeout(10000)); await credentials.unset(TOKEN_REF);
-      this.runtime.pairing = "unpaired"; this.runtime.credential = "unconfigured"; this.runtime.worker = "paused";
-      this.runtime.pairingCode = null; this.runtime.approvalUrl = null; this.runtime.pairingExpiresAt = null; this.runtime.lastError = null;
-      return { ok: true, code: "disconnected", state: "unpaired" };
-    } catch (error) { const mapped = classifyPairingError(error); return { ok: false, code: mapped.code, message: mapped.message }; }
+      config = currentConfig(this.input);
+    } catch (error) {
+      return { ok: false, code: "config_invalid", state: "error", message: redactSecret(error) };
+    }
+
+    const credentials = currentCredentials(this.ctx);
+    if (credentials === undefined) {
+      return {
+        ok: false,
+        code: "credential_unavailable",
+        state: "error",
+        message: "Harness Credential provider 不可用。",
+      };
+    }
+
+    let token;
+    try {
+      token = await resolveWorkerToken(credentials);
+    } catch (error) {
+      return {
+        ok: false,
+        code: "credential_resolve_failed",
+        state: "error",
+        message: `读取 Harness Worker 凭据失败：${redactSecret(error)}`,
+      };
+    }
+
+    if (!token) {
+      this.runtime.pairing = "unpaired";
+      this.runtime.credential = "unconfigured";
+      return { ok: true, code: "already_disconnected", state: "unpaired" };
+    }
+
+    try {
+      await pairingRequest(config, token, "disconnect", {}, AbortSignal.timeout(10000));
+    } catch (error) {
+      const mapped = classifyPairingError(error);
+      this.runtime.pairing = mapped.state;
+      this.runtime.lastError = mapped.message;
+      return { ok: false, ...mapped };
+    }
+
+    try {
+      await clearWorkerToken(credentials);
+    } catch (error) {
+      this.runtime.pairing = "revoked";
+      this.runtime.worker = "paused";
+      this.runtime.lastError = "Cloud 已断开，但本地 Credential 清理失败。";
+      return {
+        ok: false,
+        code: "credential_cleanup_failed",
+        state: "revoked",
+        message: `Cloud 已断开，但本地 Credential 清理失败：${redactSecret(error, token)}`,
+      };
+    }
+
+    this.runtime.pairing = "unpaired";
+    this.runtime.credential = "unconfigured";
+    this.runtime.worker = "paused";
+    this.runtime.pairingCode = null;
+    this.runtime.approvalUrl = null;
+    this.runtime.pairingExpiresAt = null;
+    this.runtime.lastError = null;
+    return { ok: true, code: "disconnected", state: "unpaired" };
   }
 
   generateToken() {
@@ -247,7 +480,7 @@ export class WorkerControlService extends TypertRemoteService {
 
     let token;
     try {
-      token = credentialValue(await credentials.resolve(TOKEN_REF));
+      token = await resolveWorkerToken(credentials);
     } catch (error) {
       return { ok: false, code: "credential_error", message: `读取 Harness Credentials 失败：${redactSecret(error)}` };
     }
@@ -264,7 +497,7 @@ export class WorkerControlService extends TypertRemoteService {
       this.runtime.pairing = "paired";
       this.runtime.lastError = config.trustedWorkspaceMode
         ? null
-        : "当前为受限工作区模式；0.2.1 不领取远程执行任务。";
+        : "当前为受限工作区模式；0.3.1 不领取远程执行任务。";
       this.runtime.workerId = config.workerId;
       this.runtime.workspaceCount = config.authorizedWorkspaceIds.length;
       return {
@@ -272,7 +505,7 @@ export class WorkerControlService extends TypertRemoteService {
         code: "connected",
         message: config.trustedWorkspaceMode
           ? "连接成功。授权 Harness Workspace 已报告给 Cloud。"
-          : "连接成功；当前处于受限工作区模式，0.2.1 不领取远程执行任务。",
+          : "连接成功；当前处于受限工作区模式，0.3.1 不领取远程执行任务。",
         workerId: config.workerId,
       };
     } catch (error) {
@@ -343,7 +576,7 @@ async function runWorker(ctx, input, runtime, signal) {
       }
       if (!config.trustedWorkspaceMode) {
         runtime.worker = "paused";
-        runtime.lastError = "当前为受限工作区模式；0.2.1 不领取远程执行任务。";
+        runtime.lastError = "当前为受限工作区模式；0.3.1 不领取远程执行任务。";
         registeredSignature = "";
         registeredToken = undefined;
         await sleep(pollIntervalMs, signal);
@@ -360,7 +593,7 @@ async function runWorker(ctx, input, runtime, signal) {
         await sleep(pollIntervalMs, signal);
         continue;
       }
-      token = credentialValue(await credentials.resolve(TOKEN_REF));
+      token = await resolveWorkerToken(credentials);
       if (!token) {
         runtime.credential = "unconfigured";
         runtime.worker = "paused";

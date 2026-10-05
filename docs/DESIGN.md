@@ -1,39 +1,155 @@
-# DeepSeek Worker Connector 0.3.0 设计
+# DeepSeek Worker Connector 0.3.1 设计
 
-## 1. 产品目标
+## 1. 本轮边界
 
-最终用户流程：安装 DeepSeek Worker 应用 → 安装 Harness Connector → 选择 Workspace → 点击连接 → 使用 ChatGPT 身份确认 → 开始使用。用户不需要 Site 管理权限，也不需要复制全局 Secret。
+0.3.1 是 Connector patch release。Cloud Site、D1、MCP、`/api/worker/*` 与现有 Cloud pairing protocol 不在修改范围。
 
-## 2. 身份分层
+保留 0.3.0 的 WorkspaceId 与 per-worker pairing 方向，本轮修正 Host Credentials 真实契约、Remote failure boundary 与普通用户 UI。
 
-每个 Connector 安装实例生成独立 Worker Token；Token 只保存在 Harness Credentials，Cloud 只保存 token_hash。Worker 身份由 `worker_id + token_hash` 组成，用户身份由配对确认页面的 Sign in with ChatGPT 提供。
+## 2. beginPairing 的 Host 边界
 
-## 3. 配对状态
+Harness 当前 Credentials provider：
 
-`unpaired → pending → paired → revoked/unpaired`。
+    resolve(ref) -> Promise<{ value, source } | undefined>
+    describe(ref) -> Promise<{ configured, source?, writable }>
+    set(ref, value) -> Promise<void>
+    unset(ref) -> Promise<void>
 
-`/api/pair/start` 不接收原始 Token，只接收 SHA-256 `token_hash`。短期配对码不是长期认证凭据。
+0.3.0 的代码已有部分兼容函数，但 Host pairing 三个 Remote 没有用真实 Gateway discovery + 官方 Credentials object shape 做完整调用测试，而且 `beginPairing` 的部分 dependency preflight 位于 pairing HTTP error handling 之外。
 
-## 4. 本机 Secret
+因此真实 provider / registry 抛出的异常可能逃出 Remote business method，由 API Gateway 统一表现为 `gateway/internal`。仅凭真机 UI 中的 `gateway/internal` 无法还原旧版本机器上具体是哪一个底层异常，所以 0.3.1 不伪造一个未经日志证明的单一异常文本，而是关闭所有已知逃逸路径并用真 Host 调用测试锁定契约。
 
-Credential ref 仍为 `LOCAL_WORKER_TOKEN`，但它只代表这台 Harness Worker 的设备凭据，不再对应 Site 全局 Secret。
+## 3. Credentials adapter
 
-0.3.0 显式兼容官方 `ctx.credentials.resolve() -> { value, source } | undefined`。
+Host 内部统一：
 
-## 5. Worker API
+    describeWorkerCredential(credentials)
+    resolveWorkerToken(credentials)
+    saveWorkerToken(credentials, token)
+    clearWorkerToken(credentials)
 
-配对完成后，现有 `/api/worker/*` 继续使用 Bearer。Cloud 通过 worker_id 查 active device，再比较 SHA-256 Bearer 与 token_hash。
+`resolveWorkerToken` 只接受官方 `{ value, source }`；旧 string mock 不再被测试接受。
 
-## 6. Workspace
+## 4. beginPairing
 
-继续使用官方 WorkspaceId。Trusted Workspace 不扩大项目边界，Cloud 仍不能传任意本地路径。
+顺序：
 
-## 7. UI
+1. normalize Connector config。
+2. 至少一个 `authorizedWorkspaceIds`。
+3. 验证授权 Workspace 仍在 `workspaceRegistry`。
+4. `credentials.describe(LOCAL_WORKER_TOKEN)` 检查 provider 可写。
+5. Host 生成随机 Worker Token。
+6. `credentials.set(LOCAL_WORKER_TOKEN, token)`。
+7. Host 计算 SHA-256。
+8. 调用既有 `POST /api/pair/start`，请求体只包含 hash 与非 Secret 元数据。
+9. 校验 Cloud 返回的 HTTPS `approvalUrl`。
+10. 返回 Browser：state / pairingCode / approvalUrl / expiresAt，不返回 Token。
 
-默认显示“连接 DeepSeek Worker / 配对码 / 打开配对页面 / 已配对 / 断开配对”。手工 Token 只放高级兼容区。
+## 5. pairingStatus / disconnectPairing
 
-## 8. 迁移
+`pairingStatus` 每次重新 `resolve` 当前 Credential，不缓存 Secret。成功状态规范化为：
 
-Cloud 0.3.0 尚未部署时，旧手工 Token + 0.2.1 Cloud 仍可工作。配对 API 404 时 UI 明确提示 Cloud 尚未部署 0.3.0 配对 API。
+    unpaired | pending | paired | expired | revoked | error
 
-详细 Cloud 契约见 `docs/CLOUD-PAIRING.md`。
+`disconnectPairing` 先使用当前 Credential 调用现有 Cloud disconnect，再删除 Harness Credential。Cloud 已断开但本地 unset 失败时返回明确 cleanup failure，不伪装成功。
+
+## 6. Browser 一键连接
+
+默认 UI 不暴露 Token 概念。
+
+未连接：
+
+    安装并连接 ChatGPT
+
+点击后：
+
+    save config
+      -> beginPairing
+      -> open approvalUrl
+      -> polling pairingStatus every ~3s
+
+pending：
+
+    打开连接页面
+    检查状态
+
+paired：
+
+    在 ChatGPT 中打开
+    断开连接
+
+## 7. 打开 URL
+
+Connector 不知道也不猜 OpenAI Plugin Directory listing URL。
+
+优先使用 Cloud 返回的 HTTPS `approvalUrl`。没有 retained approvalUrl 时，只基于已配置 Cloud endpoint 生成同 origin 的 `/setup`，可附短期 pairing code。
+
+Browser 使用 Harness 客户端已有的外链模式：
+
+    window.open(url, "_blank", "noopener,noreferrer")
+
+没有 custom protocol callback、localhost callback 或 Token query 参数。
+
+## 8. 页面 reopen 与 polling
+
+页面加载：
+
+1. Browser 调用 `remote.credentials.describe`，只读取 metadata。
+2. 未配置 → unpaired。
+3. 已配置 → 立即调用 Host `pairingStatus()`。
+4. pending → 启动约 3 秒 polling。
+5. paired / expired / revoked / error → 停止高频 polling。
+
+Secret 不进入 Browser。
+
+## 9. 高级 / 诊断
+
+默认折叠，保留：
+
+- Endpoint
+- Worker ID
+- 手动 Token
+- 随机 Token
+- 保存 Token
+- intervals
+- Headless fallback
+- 测试连接
+- pairing code diagnostics
+
+这保证旧 Cloud / 开发 / 恢复兼容，而不污染普通用户主流程。
+
+## 10. Workspace 与 Native Session
+
+没有重构：
+
+- `ctx.workspaces`
+- `ctx.workspaceRegistry`
+- `authorizedWorkspaceIds`
+- `trustedWorkspaceMode`
+- `sessionController.create({ workspaceId })`
+- continue/rework 的 Session membership + cwd 校验
+- Cloud local-path field rejection
+
+## 11. 自动验证
+
+Windows `windows-latest` / Node 22：
+
+    44 tests
+    44 pass
+    0 fail
+
+Host probe 不是 mock 一个已经存在的 Client namespace；它加载真实 `index.js` 与 `WorkerControlService`，按 Gateway discovery 结构找到 receiver 后实际调用：
+
+- status
+- generateToken
+- beginPairing
+- pairingStatus pending
+- pairingStatus paired
+- pairingStatus expired
+- disconnectPairing
+- beginPairing with API unavailable
+- test
+
+Credentials mock 使用官方 `{ value, source }` shape。
+
+Browser tests 覆盖 3 秒 polling、reopen、setup URL、Token 不进 URL/持久存储、普通 UI 与高级兼容入口。

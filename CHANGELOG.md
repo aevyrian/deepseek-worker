@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+
+- 修复 Windows DeepSeek Harness Desktop 中 `beginPairing()` 可能被 Gateway 折叠为 `gateway/internal` 的 Host 路径。
+- pairing Host methods 全部按 Harness 当前 Credentials API 处理 `resolve(ref) -> { value, source } | undefined`。
+- `beginPairing` 的 Workspace Registry 与 Credential preflight 不再让本地异常直接逃出 Remote method。
+- `pairingStatus` 与 `disconnectPairing` 使用同一严格 Credential 解包逻辑。
+- 修复本轮测试中发现的 Credential helper 递归缺陷。
+
+### Changed
+
+- 普通 UI 改为“设备连接”优先，不再首先展示 Token / Endpoint / Worker ID。
+- 默认按钮为“安装并连接 ChatGPT”。
+- pending 状态显示“打开连接页面 / 检查状态”。
+- paired 状态显示“在 ChatGPT 中打开 / 断开连接”。
+- Endpoint、Worker ID、手动 Token、interval、Headless fallback 与测试连接全部移入默认折叠的“高级 / 诊断”。
+- 页面 reopen 时，如果 Credential 已配置，会自动调用 `pairingStatus()` 恢复状态。
+- pending 每约 3 秒 polling，paired/expired/revoked/error 自动停止。
+
+### Security
+
+- 自动配对 Token 由 Host 生成并先写入 Harness Credentials。
+- `pair/start` 只发送 SHA-256 `token_hash`，不发送原始 Token，也不带该 Token 的 Bearer。
+- Browser 不读取保存后的 Token。
+- Token 不进入 Config、Local Storage、Session Storage、URL、Query String、Clipboard 或日志。
+- approval URL 只接受无 username/password 的 HTTPS URL。
+- Connector 不猜 ChatGPT Plugin Directory URL；优先消费 Cloud 返回的 `approvalUrl`，兼容使用 Cloud `/setup` 入口。
+
+### Preserved
+
+- Cloud Site / D1 / MCP / `/api/worker/*` / Cloud pairing protocol 未修改。
+- Harness WorkspaceId、`authorizedWorkspaceIds`、`trustedWorkspaceMode`、Native Session、continue/rework、Cloud path 拒绝全部保留。
+
+### Validation
+
+Windows GitHub Actions / Node 22：
+
+- JavaScript / MJS syntax checks 全通过。
+- `npm test`：**44/44 pass，0 fail**。
+- Host discovery probe 经 Gateway-style discovery 实际调用 pairing 三个 Remote。
+- 覆盖 official Credential object shape、pending→paired、expired、API unavailable、Browser polling/reopen 与 Token URL/持久化约束。
+
 ## 0.3.0
 
 ### Added

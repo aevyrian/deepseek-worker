@@ -24,6 +24,8 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'protocol.mjs syntax check failed.' }
   & node --check .\lib\native-session.mjs
   if ($LASTEXITCODE -ne 0) { throw 'native-session.mjs syntax check failed.' }
+  & node --check .\lib\pairing.mjs
+  if ($LASTEXITCODE -ne 0) { throw 'pairing.mjs syntax check failed.' }
   & node --test .\tests\*.test.mjs
   if ($LASTEXITCODE -ne 0) { throw 'Connector test suite failed.' }
 } finally {
@@ -41,7 +43,7 @@ if ($Profile) {
   if ($bundles -notcontains 'deepseek-worker-connector') {
     throw "Harness profile '$Profile' does not list deepseek-worker-connector in dsh.profile.bundles."
   }
-  Write-Host "Harness profile '$Profile' contains the connector bundle. Confirm 0.2.1 Host Remote discovery, Credentials, and UI activation in Desktop."
+  Write-Host "Harness profile '$Profile' contains the connector bundle. Confirm 0.3.1 one-click pairing, Credentials, and Native Harness status in Desktop."
 }
 
 Write-Host 'Local checks passed. No Site requests, D1 writes, credential reads, or profile changes were made by this test script.'
