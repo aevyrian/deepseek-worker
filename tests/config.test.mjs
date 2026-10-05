@@ -61,6 +61,8 @@ test("connector config serialization contains WorkspaceIds but ignores token and
     endpoint: "https://example.test/api/worker",
     authorizedWorkspaceIds: ["workspace-a"],
     trustedWorkspaceMode: true,
+    autoUpdate: true,
+    updateChannel: "stable",
     LOCAL_WORKER_TOKEN: secret,
     token: secret,
     workspaceAllowlist: { alias: "E:/secret/project" },
@@ -68,6 +70,8 @@ test("connector config serialization contains WorkspaceIds but ignores token and
   const json = JSON.stringify(snapshot);
   assert.deepEqual(snapshot.authorizedWorkspaceIds, ["workspace-a"]);
   assert.equal(snapshot.trustedWorkspaceMode, true);
+  assert.equal(snapshot.autoUpdate, true);
+  assert.equal(snapshot.updateChannel, "stable");
   assert.equal(json.includes(secret), false);
   assert.equal(json.includes("E:/secret/project"), false);
   assert.equal(Object.hasOwn(snapshot, "workspaceAllowlist"), false);
@@ -91,4 +95,21 @@ test("reports Native, Headless, and Unknown execution distinctly", () => {
   assert.equal(executionMode(true), "native");
   assert.equal(executionMode(false), "headless");
   assert.equal(executionMode(undefined), "unknown");
+});
+
+test("public status exposes non-sensitive update runtime only", () => {
+  const status = publicRuntimeStatus({
+    connector: "loaded",
+    currentVersion: "0.3.1",
+    latestVersion: "0.3.2",
+    updateState: "waiting-idle",
+    lastCheckedAt: "2026-10-05T12:00:00.000Z",
+    restartRequired: false,
+    lastUpdateError: null,
+  });
+  assert.equal(status.currentVersion, "0.3.1");
+  assert.equal(status.latestVersion, "0.3.2");
+  assert.equal(status.updateState, "waiting-idle");
+  assert.equal(status.restartRequired, false);
+  assert.equal(Object.hasOwn(status, "token"), false);
 });
