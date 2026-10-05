@@ -130,9 +130,9 @@ Secret 不进入 Browser。
 - continue/rework 的 Session membership + cwd 校验
 - Cloud local-path field rejection
 
-## 11. 自动验证
+## 11. Pairing 基线自动验证
 
-Windows `windows-latest` / Node 22：
+自更新开发前的 0.3.1 pairing/UI 基线在 Windows `windows-latest` / Node 22 为：
 
     44 tests
     44 pass
@@ -168,3 +168,24 @@ Worker runtime 用 workerBusy 覆盖 claim 到 result/failure/lease cleanup 的�
 Plugin Manager 对已安装 package replacement 返回 restart-required，所以新的 package 文件落盘后，当前旧 generation 继续运行到 Harness 重启。没有使用动态 import 新 bundle、强制 kill 或私有 Electron relaunch。
 
 UpdateProvider 预留固定 Cloud endpoint /api/connector/latest；本版本不实现 Cloud 端，只在 endpoint 不可用时 fallback GitHub。
+
+## 13. Self Update 最终验证
+
+正式 `.github/workflows/test.yml` 在 Windows `windows-latest` / Node 22 上执行：
+
+    node --check index.js
+    node --check client.js
+    node --check lib/connector-config.mjs
+    node --check lib/protocol.mjs
+    node --check lib/native-session.mjs
+    node --check lib/pairing.mjs
+    node --check lib/update.mjs
+    npm test
+
+最终 suite：
+
+    75 tests
+    75 pass
+    0 fail
+
+临时 `v031-self-update-validation` workflow 不进入 main；Windows 自更新验证已并入项目长期 `test` workflow。
