@@ -27,6 +27,7 @@ import { authorizedWorkspaceState, workspaceHeartbeatPayload } from "./lib/works
 import { executeNativeSession } from "./lib/native-session.mjs";
 import { registerOrchestratorPreset } from "./lib/orchestrator-preset.mjs";
 import { migrateLegacyOrchestratorBundles } from "./lib/migration.mjs";
+import { migrateLegacyProfileArtifacts } from "./lib/profile-cleanup.mjs";
 import {
   classifyPairingError,
   credentialInfo,
@@ -182,6 +183,14 @@ export class WorkerControlService extends TypertRemoteService {
             ctx.logger.warn("deepseek-worker: legacy total-control preset cleanup was incomplete; Connector will continue with runtime preset registration");
           } else if (migration.removed.length > 0) {
             ctx.logger.info("deepseek-worker: removed legacy total-control preset bundle");
+          }
+          try {
+            const cleanup = await migrateLegacyProfileArtifacts(pluginManager, ctx.logger);
+            if (cleanup.patchChanged || cleanup.linkRemoved || cleanup.sourceRetired) {
+              ctx.logger.info("deepseek-worker: legacy profile artifacts cleaned; restart Harness to reload profile patches");
+            }
+          } catch (error) {
+            ctx.logger.warn("deepseek-worker: legacy profile artifact cleanup was skipped: %s", redactSecret(error));
           }
         }
 
