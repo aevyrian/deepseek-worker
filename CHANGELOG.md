@@ -2,6 +2,8 @@
 
 ## 0.4.8
 
+- 版本页现在区分“当前运行版本”和“磁盘已安装版本”；当新包已经落盘但 Harness 仍运行旧模块时，明确提示需要重启，不再让用户误以为安装失败。
+- Connector 状态会通过 Harness Plugin Manager 读取已安装包版本；若磁盘版本高于当前运行版本，则自动标记为 `restart-required` 并把已安装版本作为最新版本展示。
 - 增加旧版“总控执行模式”迁移：启动时通过 Harness 官方 Plugin Manager 检查历史 `@local/dsh-orchestrator-worker-preset` / `dsh-orchestrator-worker-preset` bundle。
 - 旧 bundle 可在线卸载时自动停用并移除；无 HMR 的环境先停用并提示重启一次，下次启动继续完成清理。
 - 迁移失败、bundle 仍被占用或 Plugin Manager 不可用时，不阻断 Connector、配对、Workspace、Native Session 或运行期“总控执行模式”注册。
