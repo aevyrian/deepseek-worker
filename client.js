@@ -754,7 +754,7 @@ window.__ModuleLoader__.load({
           h("h3", { style: { margin: 0 } }, t("version")),
           h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
             h("span", null, t("version")),
-            h("strong", null, status?.currentVersion || "0.3.3-preview.6"),
+            h("strong", null, status?.currentVersion || "0.3.3-preview.7"),
           ),
           h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
             h("span", null, t("autoUpdate")),
@@ -781,7 +781,7 @@ window.__ModuleLoader__.load({
           ),
           h(StatusLine, { label: t("updateStatus"), value: updateState, display: updateDisplay }),
           status?.restartRequired
-            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.3.3-preview.6"} · ${t("updateRestart")}`)
+            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.3.3-preview.7"} · ${t("updateRestart")}`)
             : null,
           updateState === "failed"
             ? h("div", { style: gridStyle },
@@ -857,7 +857,7 @@ window.__ModuleLoader__.load({
             h(StatusLine, { label: t("worker"), value: status?.worker || "paused", display: status?.worker || "paused" }),
             h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
               h("span", null, t("latestVersion")),
-              h("span", null, status?.latestVersion || status?.currentVersion || "0.3.3-preview.6"),
+              h("span", null, status?.latestVersion || status?.currentVersion || "0.3.3-preview.7"),
             ),
             h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
               h("span", null, t("lastChecked")),
