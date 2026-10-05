@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.8
+
+- 增加旧版“总控执行模式”迁移：启动时通过 Harness 官方 Plugin Manager 检查历史 `@local/dsh-orchestrator-worker-preset` / `dsh-orchestrator-worker-preset` bundle。
+- 旧 bundle 可在线卸载时自动停用并移除；无 HMR 的环境先停用并提示重启一次，下次启动继续完成清理。
+- 迁移失败、bundle 仍被占用或 Plugin Manager 不可用时，不阻断 Connector、配对、Workspace、Native Session 或运行期“总控执行模式”注册。
+- 不直接改写用户 Profile 文件，不触碰 Token、设备配对、Workspace 授权或现有 Session。
+- 保持新安装默认更新通道为“正式版（stable）”；已有用户主动选择的通道不被强制覆盖。
+- 新增旧 bundle 迁移回归测试。
+
 ## 0.4.7
 
 - 恢复 Harness 预设列表中的“总控执行模式”，同时保持 Connector 可正常停用和卸载。
