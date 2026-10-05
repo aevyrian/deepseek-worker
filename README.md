@@ -4,11 +4,9 @@
 
 本仓库是 **DeepSeek Worker 系统的本地端组件**。它不是云端 MCP Site，也不是独立常驻的 Node Worker。
 
-项目目标是把 DeepSeek Harness 本身变成一个可被云端调度的执行节点：ChatGPT 负责规划、调度和验收，云端 DeepSeek Worker 负责任务编排与持久化，本机 DeepSeek Harness 负责真实项目、文件、Shell、Git 和本地工具执行。
+当前版本：**0.1.0-beta.2**
 
-## 项目定位
-
-整个系统由两个彼此独立、通过协议连接的组件组成：
+## 架构
 
 ```text
 ChatGPT
@@ -20,194 +18,365 @@ MCP / D1 / Cloud DeepSeek / Task Router
    │ HTTPS + Bearer Worker Protocol
    ▼
 DeepSeek Worker Connector
-本仓库
+本仓库 / DeepSeek Harness 插件
    │
    ▼
 DeepSeek Harness
 Session / Agent / Tools / Files / Shell / Git
 ```
 
-- **云端组件**：由 ChatGPT Sites 托管，负责任务、状态、上下文、D1、Cloud DeepSeek 和本地 Worker 调度。
-- **本地组件**：本仓库中的 Harness 插件，负责把本机 DeepSeek Harness 接入云端。
-- **两者独立维护**：云端 Site 更新不会覆盖本地插件，本地插件更新也不需要重新创建 Site。
+当前 Connector 对接既有 Worker API：
 
-## 为什么做成 Harness 插件
+```text
+POST /api/worker/register
+POST /api/worker/heartbeat
+POST /api/worker/claim
+POST /api/worker/lease/renew
+POST /api/worker/events
+POST /api/worker/result
+POST /api/worker/failure
+```
 
-最初方案是单独运行一个 `worker.js`，不断轮询云端，再通过 `dsh --profile headless` 启动任务。
+本仓库 **不会修改 ChatGPT Site、D1 或 Site Secret**。云端的 `LOCAL_WORKER_TOKEN` 仍需用户单独配置。
 
-现在改成 Harness 原生插件，主要原因是：
+## beta.2 新增
 
-1. **直接复用 Harness Session**：任务可以绑定 `task_id ↔ session_id`，continue / rework 能继续原会话。
-2. **直接复用 Harness 能力**：本地文件、Shell、Git、工具系统、模型和 Session 生命周期都由 Harness 自己管理。
-3. **更少的外围进程**：不需要额外常驻一个独立 Node Worker。
-4. **更容易升级和回滚**：源码固定在 GitHub，通过 Git 地址安装和更新。
-5. **权限边界更清晰**：云端只知道 `workspace_id`，本机插件再映射到允许访问的目录。
+beta.2 把 Connector 从“能安装、靠配置文件使用”升级为可以在 DeepSeek Harness Desktop 插件页中直接配置的插件：
 
-详细设计见 [docs/DESIGN.md](docs/DESIGN.md)。
-
-## 当前能力
-
-当前 Connector 已包含：
-
-- Harness Bundle 元数据与 `dsh.bundle.patch.yml`
-- `ctx.credentials` 读取本地 Worker Token
-- 优先使用 `ctx.sessionController` 执行任务
-- `task_id ↔ session_id` 续作设计
-- `workspaceAllowlist` 本地目录白名单
-- Worker 注册、心跳、领取、租约续期、事件、结果和失败回传协议
-- HTTPS 出站连接，不要求本机开放公网端口
-- Secret 日志脱敏
-- Harness Session 不可用时的 headless CLI fallback
-- 本地协议测试与安装脚本
-
-## 当前状态
-
-仓库版本：**0.1.0-beta.1**
-
-需要特别说明：
-
-- 本仓库已经包含本地 Connector。
-- 当前线上 DeepSeek Worker Site 的稳定版本仍是旧 Worker 架构。
-- Connector 所需的 `/api/worker/*` 云端路由和对应 D1 新字段尚未正式部署。
-- 因此现在可以安装、检查 Bundle，但完整 Cloud ↔ Harness 任务闭环要等云端 Site Patch 发布后才能启用。
+- 中文可视化配置页
+- Endpoint / Worker ID 配置
+- Harness Credentials 中的 Worker Token 配置
+- 安全随机 Token 生成
+- Workspace 添加、修改、删除
+- Poll / Heartbeat / Lease 等高级设置
+- Native Session Controller / Headless fallback 状态
+- Cloud / Worker / Last heartbeat 状态
+- 主动“测试连接”
+- Harness Config / volatile 配置即时更新
+- 预构建 `client.js`，Git URL 安装后不要求用户手工 build
 
 ## 安装
 
-DeepSeek Harness 官方插件管理器支持 Git 地址。
-
-### Harness 插件页面
-
-在 **Plugins / 添加插件** 中填入：
+在 DeepSeek Harness 的插件管理器中添加：
 
 ```text
 https://github.com/aevyrian/deepseek-worker.git
 ```
 
-安装后启用该 Bundle。
-
-### CLI
+也可以使用 CLI：
 
 ```powershell
 dsh plugin --profile <你的-profile> add https://github.com/aevyrian/deepseek-worker.git
 ```
 
-也可以克隆仓库后从本地目录安装：
+安装后启用 `DeepSeek Worker Connector`。
 
-```powershell
-git clone https://github.com/aevyrian/deepseek-worker.git
-cd deepseek-worker
-pwsh -NoProfile -File .\install.ps1 -Profile <你的-profile>
-```
+## 可视化配置
 
-> Harness 当前插件升级机制仍以“卸载旧版本后重新安装”为主。正式使用后建议按 Git tag 固定稳定版本。
-
-## 配置
-
-默认配置位于 `dsh.bundle.patch.yml`。
-
-Workspace 白名单示例：
-
-```yaml
-workspaceAllowlist:
-  novel: "E:/项目/deep"
-  douyin: "E:/项目/douyin-download-manager"
-```
-
-云端任务只传：
+打开：
 
 ```text
-workspace_id = "novel"
+DeepSeek Harness
+→ 插件
+→ DeepSeek Worker Connector
+→ deepseek-worker-connector
+→ 配置
 ```
 
-本地再解析为真实路径。云端不能直接指定任意 `C:\` 或 `E:\` 路径。
+配置页分为四部分。
 
-### 凭据
+### 1. 云端连接
 
-Worker Token 通过 Harness credentials 能力读取：
+默认：
+
+```text
+Endpoint:
+https://deepseek-worker.sxfdgan.chatgpt.site/api/worker
+
+Worker ID:
+deepseek-worker-windows
+```
+
+Endpoint 必须使用 HTTPS。
+
+### 2. Worker Token
+
+Credential ref 固定为：
 
 ```text
 LOCAL_WORKER_TOKEN
 ```
 
-不要把 Token 写进 GitHub、bundle patch、README、日志或命令行。
+Token **不进入 Connector 配置**，而是通过 Harness 官方 Credentials 系统保存。
+
+页面只会读取：
+
+```text
+已配置 / 未配置
+是否可写
+```
+
+不会从 Credentials 重新读取并显示已保存的 Secret。
+
+可以：
+
+- 手工输入一个 Token 并“保存到 Harness”
+- 点击“生成随机 Token”生成 32 bytes 随机熵对应的 64 位 hex Token
+- 在刚生成时复制
+- 将同一个值手工配置到 DeepSeek Worker Site Secret：`LOCAL_WORKER_TOKEN`
+- 保存到 Harness 后页面清除该明文值
+
+> 已保存 Token 无法从配置页重新查看。遗失时应重新生成，并同时更新 Harness Credentials 与 Site Secret。
+
+Token 不会写进：
+
+- `package.json`
+- `dsh.bundle.patch.yml`
+- Git
+- README
+- Local Storage
+- URL
+- Connector 状态接口
+- 日志
+
+## Workspace
+
+Cloud 只传：
+
+```text
+workspace_id = novel
+```
+
+本地 Connector 保存映射，例如：
+
+```text
+novel   → E:\项目\deep
+douyin  → E:\项目\douyin-download-manager
+```
+
+配置页支持添加、修改和删除。
+
+校验规则：
+
+- Workspace ID 不能为空
+- Workspace ID 不能重复
+- 本地路径必须是 Windows 或 POSIX 绝对路径
+- Cloud 不能下发新的本地绝对路径
+
+默认：
+
+```yaml
+workspaceAllowlist: {}
+```
+
+空白 allowlist 时 Worker 会 **fail closed / paused**。beta.2 不再因为启动时 allowlist 为空而永久退出循环；添加 Workspace 后，volatile 配置会在后续轮询中生效。
+
+## 连接状态
+
+配置页显示：
+
+```text
+Connector        已加载
+Harness execution Native Harness / Headless fallback
+Credential       已配置 / 未配置
+Cloud            在线 / 未认证 / 离线 / 未测试
+Worker           online / paused / error
+Last heartbeat   时间
+```
+
+如果当前 profile 没有 `sessionController`，页面会明确显示：
+
+```text
+Headless fallback
+```
+
+而不是把它伪装成 Native Harness。
+
+## 测试连接
+
+“测试连接”只在用户主动点击时执行。
+
+顺序：
+
+1. 校验 Connector 配置
+2. 检查至少一个 Workspace
+3. Host 从 Harness Credentials 解析 `LOCAL_WORKER_TOKEN`
+4. 请求现有：
+   ```text
+   POST /api/worker/register
+   ```
+5. 返回脱敏的结构化结果
+
+可能显示：
+
+- 连接成功
+- Worker Token 未配置
+- 云端 Token 缺失或不匹配（HTTP 401）
+- Worker 尚未配对 / 未授权（HTTP 403）
+- Workspace 未配置
+- 网络无法访问
+- TLS 错误
+
+如果 Worker 尚未在 Cloud 配对，应先通过 ChatGPT 的 DeepSeek Worker MCP 注册该 Worker ID。Connector 不会绕过配对机制。
+
+## 即时配置
+
+beta.2 的以下字段使用 Harness Config / volatile 配置：
+
+- endpoint
+- workerId
+- workspaceAllowlist
+- poll interval
+- heartbeat interval
+- lease renew interval
+- lease wait timeout
+- headless fallback
+- headless command / args
+
+后台 Worker 每次循环读取当前配置。Endpoint、Worker ID、Workspace 或 Token 变化后会重新 register。
+
+已经领取并正在执行的单个任务使用其开始时的配置快照，不会在任务中途切换 Workspace 或 lease 参数。
 
 ## 执行模式
 
-优先使用：
+主路径：
 
 ```text
 ctx.sessionController
 ```
 
-如果当前 profile 没有该服务，才使用：
+如果当前 profile 没有原生 Session Controller，并且允许 fallback：
 
 ```text
 dsh --profile headless --json
 ```
 
-headless 只是兼容 fallback，不是主路径。
+headless 只是兼容路径，不是主执行路径。
 
-## 任务生命周期
+## Browser / Host 边界
+
+Browser Client 只负责：
+
+- 配置 UI
+- Credential 的 `describe / set`
+- 显示状态
+- 用户主动测试连接
+
+Host 继续负责：
+
+- Token resolve
+- register / heartbeat / claim
+- lease renew
+- Harness Session
+- headless fallback
+- result / failure
+
+Browser 不会拿已保存的 Bearer Token 自己请求 Cloud。
+
+配置页通过 Harness 官方插件页面 slot：
 
 ```text
-云端创建任务
-    ↓
-Connector claim
-    ↓
-校验 workspace_id
-    ↓
-创建或恢复 Harness Session
-    ↓
-执行任务
-    ↓
-保持 lease
-    ↓
-回传 result / failure
-    ↓
-云端保存 session_id
-    ↓
-continue / rework
-    ↓
-恢复同一 Session
+plugins.row.config
 ```
+
+外部 Git Bundle 的 Browser half 通过：
+
+```text
+dsh.client
+./client
+client.js
+```
+
+提供。
+
+Host → Browser 的运行状态和测试动作通过 Harness Typert Remote seam 暴露；Remote 方法没有 Token 返回字段。
 
 ## 安全原则
 
-- 只允许 HTTPS Worker Endpoint
-- 本机只主动出站，不开放公网监听端口
+- HTTPS only
 - Workspace 默认空白名单并 fail closed
-- Cloud 不能传任意绝对路径
-- Token 由 `ctx.credentials` 提供
-- Authorization 和 Secret 做日志脱敏
-- 本地 Harness 插件属于高权限 Host 代码，安装前应确认来源
-- destructive 操作继续受 Harness 本身的工具权限约束
+- 不接受 Cloud 下发任意本地路径
+- Token 只通过 Harness Credentials 保存与解析
+- Authorization / Secret 日志脱敏
+- 状态接口不返回 Secret
+- 已保存 Token 不进入 Browser state
+- Token 不进入 Local Storage / URL / Git
+- 本地 Harness 插件属于高权限 Host code，安装前应确认仓库来源
+
+## 从 beta.1 升级 beta.2
+
+Harness 当前 Git 插件更新仍建议按“卸载旧版本 → 重新从 Git URL 安装”的方式操作：
+
+1. 记下你现有的 Workspace ID 与本地目录映射。
+2. 在插件管理器中禁用并卸载旧 beta.1。
+3. 再添加：
+   ```text
+   https://github.com/aevyrian/deepseek-worker.git
+   ```
+4. 启用 Connector。
+5. 打开插件配置页。
+6. 检查 Credential 是否显示“已配置”。
+7. 重新确认 Workspace allowlist。
+8. 点击“测试连接”。
+
+`LOCAL_WORKER_TOKEN` 存在 Harness Credentials 中，不在插件源码配置里；不过升级后仍建议在配置页确认其状态，不要假定所有 profile/卸载路径都会保留用户配置。
+
+## 测试
+
+仓库测试：
+
+```powershell
+npm test
+```
+
+覆盖：
+
+- HTTPS endpoint
+- Workspace ID / path / duplicate
+- fail closed
+- token 生成格式与最小熵
+- Credential 状态不泄露 Secret
+- 配置序列化不包含 Token
+- Secret / Authorization redaction
+- HTTP 401 / 403 映射
+- network / TLS 映射
+- Native / Headless 状态
+- Worker 协议请求
+
+这些测试属于 **仓库级代码验证**。
+
+它们不等于 Windows DeepSeek Harness Desktop 真机联调。仍需要真实 Desktop 验证：
+
+- Git 安装是否正常拉取 beta.2 dependencies
+- 配置入口是否正常出现
+- `client.js` 是否被当前 Desktop 版本加载
+- Credentials `describe/set` 是否在该 profile 可写
+- Host Remote namespace 是否成功 mount
+- Native Session Controller 的真实识别
+- Cloud ↔ Harness 实际 register / heartbeat / claim / task 执行闭环
 
 ## 仓库结构
 
 ```text
 .
 ├─ index.js
+├─ client.js
 ├─ lib/
+│  ├─ connector-config.mjs
 │  └─ protocol.mjs
 ├─ tests/
+│  ├─ config.test.mjs
+│  └─ protocol.test.mjs
 ├─ package.json
 ├─ dsh.bundle.patch.yml
-├─ dsh.bundle.patch.example.yml
 ├─ install.ps1
 ├─ test-local.ps1
+├─ CHANGELOG.md
 └─ docs/
    └─ DESIGN.md
 ```
 
-## 开发原则
-
-这个项目不是为了把 DeepSeek Harness 做成一个“远程 Shell”。
-
-核心原则是：
-
-> **GPT 负责决策，Cloud 负责调度，Harness 负责真实执行；任务通过明确的 Session、Workspace 和权限边界连接起来。**
-
-因此 Cloud 不直接控制本机文件路径，也不持有本机模型凭据。Harness 仍然是本地执行权限的最终边界。
+详细架构见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## License
 
