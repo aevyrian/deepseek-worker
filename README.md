@@ -141,13 +141,13 @@ Browser 不读取保存后的 Token，也不把 Token 写 URL、Local Storage、
 更完整设计见 docs/UPDATE.md。
 
 
-## 总控执行模式（0.3.3-preview.3）
+## 总控执行模式（0.3.3-preview.4）
 
 Connector bundle 内置 `orchestrator-worker` Agent Preset，界面名称为“总控执行模式”。
 
 它用于 ChatGPT → DeepSeek Worker → 本机 DeepSeek Harness 的执行链：ChatGPT 负责目标、规划、判断与验收，Harness Agent 负责本机执行、修复、测试与验证。
 
-Preset 保留 Standard mode 的工具组合，只替换为执行优先、少规划、简洁汇报的 Persona；不绑定具体模型或 Provider。DeepSeek V4.1 Flash 是当前主要优化目标，但用户仍可在 Harness 中选择其他模型。
+Preset 保留执行所需的 Standard 核心工具组合，并使用执行优先、少规划、简洁汇报的 Persona；不强制加载可选的 Schedule 工具，避免某些 Harness 安装中该组件未启动时阻断整个 Native Session。Preset 不绑定具体模型或 Provider。DeepSeek V4.1 Flash 是当前主要优化目标，但用户仍可在 Harness 中选择其他模型。
 
 通过 Connector 创建的新 Native Session 会显式使用 `orchestrator-worker`。continue/rework 继续复用原 Session，不重新创建 Agent。
 

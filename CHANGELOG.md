@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3-preview.4
+
+- 修复“总控执行模式”把 `@deepseek-ai/dsh-tool-schedule` 当作硬依赖导致新 Native Session 在部分 Harness 安装中报 `never started` 的问题。
+- Schedule 不属于 ChatGPT → Worker → Harness 核心执行链，现从该 Preset 的必需工具集合移除；文件、PowerShell/Bash、Git/项目、子 Agent、Web 等核心执行能力保持不变。
+- 增加回归测试，防止未来再次把可选 Schedule 组件作为总控 Preset 的硬依赖。
+- Connector 版本推进到 `0.3.3-preview.4`，用于正式 1.0.0 前的最后真机核心指挥验收。
+
 ## 0.3.3-preview.3
 
 - Connector bundle now ships a selectable `orchestrator-worker` Agent Preset named “总控执行模式”.
