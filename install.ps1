@@ -3,7 +3,9 @@ param(
   [ValidatePattern('^[A-Za-z0-9._-]+$')]
   [string]$Profile,
 
-  [string]$DshCommand = 'dsh'
+  [string]$DshCommand = 'dsh',
+
+  [string]$Source = 'https://github.com/aevyrian/deepseek-worker.git'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,8 +22,9 @@ if ($manifest.name -ne 'deepseek-worker-connector' -or $manifest.dsh.bundle.patc
   throw 'The selected folder does not contain the expected DeepSeek Worker Connector bundle.'
 }
 
-Write-Host "Installing the local bundle into Harness profile '$Profile'."
-Write-Host 'The existing profile will be modified by the Harness plugin manager.'
-& $DshCommand plugin --profile $Profile add $bundleRoot
+Write-Host "Installing DeepSeek Worker Connector into Harness profile '$Profile'."
+Write-Host "Source: $Source"
+Write-Host 'Harness owns the package operation and profile mutation.'
+& $DshCommand plugin --profile $Profile add $Source
 if ($LASTEXITCODE -ne 0) { throw "Harness plugin installation failed with exit code $LASTEXITCODE." }
 Write-Host 'Install command completed. Restart this Harness profile if it is a startup profile, then run test-local.ps1 -Profile with this same profile.'
