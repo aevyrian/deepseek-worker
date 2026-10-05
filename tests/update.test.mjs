@@ -90,6 +90,14 @@ test("Semantic Version comparison follows SemVer precedence", () => {
   assert.equal(compareSemver("0.3.1", "0.3.1+build.5"), 0);
   assert.equal(compareSemver("0.3.2-preview.2", "0.3.2-preview.10"), -1);
   assert.equal(compareSemver("0.3.2-preview.1", "0.3.2"), -1);
+  assert.equal(
+    compareSemver("999999999999999999999999.0.0", "999999999999999999999998.999999999999999999999999.999999999999999999999999"),
+    1,
+  );
+  assert.equal(
+    compareSemver("0.3.2-preview.999999999999999999999999", "0.3.2-preview.999999999999999999999998"),
+    1,
+  );
   assert.equal(isNewerVersion("0.3.2", "0.3.1"), true);
   assert.equal(isNewerVersion("0.3.0", "0.3.1"), false);
 });
@@ -127,6 +135,15 @@ test("illegal semantic versions are rejected", () => {
 test("downgrades and same-version candidates are skipped", () => {
   assert.equal(selectUpdateCandidate([manifest("0.3.0")], "0.3.1", "stable"), null);
   assert.equal(selectUpdateCandidate([manifest("0.3.1")], "0.3.1", "stable"), null);
+});
+
+test("manifest source cannot carry its own branch or ref", () => {
+  assert.throws(
+    () => validateUpdateManifest(manifest("0.3.2", {
+      source: `${TRUSTED_SOURCE}#main`,
+    })),
+    /非规范化仓库地址/,
+  );
 });
 
 test("wrong repository source is rejected", () => {
