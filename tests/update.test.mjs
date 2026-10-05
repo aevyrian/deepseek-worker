@@ -258,7 +258,7 @@ test("minimum Harness version rejects an incompatible runtime before install", a
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ onInstall: () => { installCalls += 1; } }),
     harnessVersion: "0.4.0",
-    fetchImpl: cloudOnly(manifest("0.3.3", { minimumHarnessVersion: "0.5.0" })),
+    fetchImpl: cloudOnly(manifest("0.4.8", { minimumHarnessVersion: "0.5.0" })),
   });
   assert.equal(status.updateState, "failed");
   assert.match(status.lastUpdateError, /更高版本/);
@@ -276,7 +276,7 @@ test("untrusted installed package source is refused before replacement", async (
       onInstall: () => { installCalls += 1; },
     }),
     harnessVersion: "1.0.0",
-    fetchImpl: cloudOnly(manifest("0.3.3")),
+    fetchImpl: cloudOnly(manifest("0.4.8")),
   });
   assert.equal(status.updateState, "failed");
   assert.match(status.lastUpdateError, /GitHub 安装源/);
@@ -293,12 +293,12 @@ test("correct Git tag update uses official installBundle with enabled false", as
       onInstall: (spec, options) => calls.push({ spec, options }),
     }),
     harnessVersion: "1.0.0",
-    fetchImpl: cloudOnly(manifest("0.3.3")),
+    fetchImpl: cloudOnly(manifest("0.4.8")),
   });
 
   assert.equal(status.updateState, "restart-required");
   assert.equal(status.restartRequired, true);
-  assert.equal(status.latestVersion, "0.3.3");
+  assert.equal(status.latestVersion, "0.4.8");
   assert.deepEqual(calls, [{
     spec: `${TRUSTED_SOURCE}#${"a".repeat(40)}`,
     options: { enabled: false },
@@ -313,7 +313,7 @@ test("package metadata mismatch is rejected before Plugin Manager replacement", 
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ onInstall: () => { installCalls += 1; } }),
     harnessVersion: "1.0.0",
-    fetchImpl: cloudOnly(manifest("0.3.3"), { packageVersion: "9.9.9" }),
+    fetchImpl: cloudOnly(manifest("0.4.8"), { packageVersion: "9.9.9" }),
   });
   assert.equal(status.updateState, "failed");
   assert.match(status.lastUpdateError, /metadata/);
@@ -332,7 +332,7 @@ test("worker busy state becomes waiting-idle and update starts only after task c
       onInstall: () => { installedWhileBusy = busy; },
     }),
     harnessVersion: "1.0.0",
-    fetchImpl: cloudOnly(manifest("0.3.3")),
+    fetchImpl: cloudOnly(manifest("0.4.8")),
     isWorkerBusy: () => busy,
     sleepImpl: async () => {
       states.push(runtime.updateState);
@@ -360,7 +360,7 @@ test("Plugin Manager update failure keeps the current Connector runtime usable",
       },
     }),
     harnessVersion: "1.0.0",
-    fetchImpl: cloudOnly(manifest("0.3.3")),
+    fetchImpl: cloudOnly(manifest("0.4.8")),
   });
   assert.equal(status.currentVersion, CONNECTOR_VERSION);
   assert.equal(status.restartRequired, false);
@@ -383,7 +383,7 @@ test("bundle validation failure leaves the running Connector on the current vers
       },
     }),
     harnessVersion: "1.0.0",
-    fetchImpl: cloudOnly(manifest("0.3.3")),
+    fetchImpl: cloudOnly(manifest("0.4.8")),
   });
   assert.equal(status.currentVersion, CONNECTOR_VERSION);
   assert.equal(status.restartRequired, false);
@@ -405,7 +405,7 @@ test("official incompatibility result is surfaced without replacing runtime stat
       },
     }),
     harnessVersion: "1.0.0",
-    fetchImpl: cloudOnly(manifest("0.3.3")),
+    fetchImpl: cloudOnly(manifest("0.4.8")),
   });
   assert.equal(status.updateState, "failed");
   assert.match(status.lastUpdateError, /不兼容/);
@@ -447,7 +447,7 @@ test("update logic never mutates Credentials, pairing identity, Worker ID or Wor
     config,
     pluginManager: pluginManager(),
     harnessVersion: "1.0.0",
-    fetchImpl: cloudOnly(manifest("0.3.3")),
+    fetchImpl: cloudOnly(manifest("0.4.8")),
   });
 
   assert.equal(status.updateState, "restart-required");
