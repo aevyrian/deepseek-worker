@@ -36,10 +36,29 @@ function manifest(version = "0.3.2", overrides = {}) {
   };
 }
 
-function cloudOnly(value) {
+function cloudOnly(value, {
+  tagSha = "a".repeat(40),
+  packageVersion = value?.version,
+  packageName = CONNECTOR_PACKAGE,
+  bundlePatch = "./dsh.bundle.patch.yml",
+} = {}) {
   return async (url) => {
-    assert.match(String(url), /\/api\/connector\/latest$/);
-    return response(value);
+    const href = String(url);
+    if (href.endsWith("/api/connector/latest")) return response(value);
+    if (href.includes("/git/ref/tags/")) {
+      return response({
+        ref: `refs/tags/${value.ref}`,
+        object: { type: "commit", sha: tagSha },
+      });
+    }
+    if (href.startsWith("https://raw.githubusercontent.com/aevyrian/deepseek-worker/")) {
+      return response({
+        name: packageName,
+        version: packageVersion,
+        dsh: { bundle: { patch: bundlePatch } },
+      });
+    }
+    throw new Error(`unexpected URL: ${href}`);
   };
 }
 
@@ -268,9 +287,24 @@ test("correct Git tag update uses official installBundle with enabled false", as
   assert.equal(status.restartRequired, true);
   assert.equal(status.latestVersion, "0.3.2");
   assert.deepEqual(calls, [{
-    spec: `${TRUSTED_SOURCE}#v0.3.2`,
+    spec: `${TRUSTED_SOURCE}#${"a".repeat(40)}`,
     options: { enabled: false },
   }]);
+});
+
+test("package metadata mismatch is rejected before Plugin Manager replacement", async () => {
+  let installCalls = 0;
+  const runtime = createUpdateRuntime();
+  const status = await performUpdateCheck({
+    runtime,
+    config: { autoUpdate: true, updateChannel: "stable" },
+    pluginManager: pluginManager({ onInstall: () => { installCalls += 1; } }),
+    harnessVersion: "1.0.0",
+    fetchImpl: cloudOnly(manifest("0.3.2"), { packageVersion: "9.9.9" }),
+  });
+  assert.equal(status.updateState, "failed");
+  assert.match(status.lastUpdateError, /metadata/);
+  assert.equal(installCalls, 0);
 });
 
 test("worker busy state becomes waiting-idle and update starts only after task completion", async () => {
