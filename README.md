@@ -24,7 +24,7 @@ Do not insert implementation details or release notes above FRONT-PAGE-END.
 - 让 ChatGPT 根据上一轮真实结果继续下达下一步。
 - 在任务真正完成后，再由 ChatGPT 给你最终结果。
 
-Connector 自带 **「总控执行模式」**，通过 Worker 新建的本地任务会自动使用它，普通用户不需要自己创建 Agent Preset。
+Connector 自带 **「总控执行模式」**。插件启用时会自动把它注册到 Harness 的预设列表；ChatGPT 远程 Worker 任务也会自动采用同样的总控执行规则，普通用户不需要自己创建 Agent Preset。
 
 ## 安装前准备
 
@@ -104,7 +104,7 @@ Preset ID: orchestrator-worker
 - 普通工程错误优先由本地 Agent 自己检查、修复和重试。
 - 同一任务的后续指令会继续原来的 Session，不会每轮重新开始。
 
-你不需要手工创建这个模式，也不需要在创造模式里粘贴任何提示词。
+你不需要手工创建这个模式，也不需要在创造模式里粘贴任何提示词。停用或卸载 Connector 时，这个预设会随插件生命周期自动注销，因此不会再阻止插件卸载；重新安装并启用 Connector 后会自动恢复。
 
 ## 更新
 
