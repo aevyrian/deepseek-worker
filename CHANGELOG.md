@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.1 — Self Update
+
+### Added
+
+- 启动后自动检查正式更新；默认 autoUpdate=true、updateChannel=stable。
+- 独立 UpdateProvider：Cloud manifest 优先，固定 GitHub Releases/Tags fallback。
+- 正确 SemVer 比较、stable/preview 通道、同版本/降级/非法版本拒绝。
+- trusted source allowlist，只允许 aevyrian/deepseek-worker。
+- 正式 Git tag 先解析成 exact commit SHA，并预验 package name/version/bundle metadata。
+- Worker busy fence：Task 进行中进入 waiting-idle，Task 完成后才安装。
+- 非敏感更新状态：currentVersion/latestVersion/updateState/lastCheckedAt/restartRequired/lastUpdateError。
+- 普通 UI 增加版本、自动更新、channel、状态和失败重试。
+
+### Harness integration
+
+- 自更新只调用官方 ctx.pluginManager.listBundles() 与 ctx.pluginManager.installBundle(spec, { enabled: false })。
+- 已安装 package replacement 成功必须得到 Harness restart-required，不热加载新 Host JS。
+- Plugin Manager 的 package transaction/validation failure 使用 Harness 自己的 profile manifest/lock rollback。
+- 当前未发现面向第三方插件的通用 Desktop restart/relaunch API，因此只提示用户重启。
+
+### Preserved
+
+- Credentials / LOCAL_WORKER_TOKEN。
+- authorizedWorkspaceIds / trustedWorkspaceMode / endpoint / workerId。
+- pairing identity 与 Cloud pairing protocol。
+- Native Session / continue / rework。
+- Cloud Site / D1 / MCP / /api/worker/* 均未修改。
+
 ## 0.3.1
 
 ### Fixed
