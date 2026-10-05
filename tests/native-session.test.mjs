@@ -78,7 +78,7 @@ test("new Native Session is created with WorkspaceId and never cwd", async () =>
     new AbortController().signal,
     1000,
   );
-  assert.deepEqual(controller.calls.create, [{ workspaceId: "workspace-a", agentPreset: "orchestrator-worker" }]);
+  assert.deepEqual(controller.calls.create, [{ workspaceId: "workspace-a", agentPreset: "standard" }]);
   assert.equal(Object.hasOwn(controller.calls.create[0], "cwd"), false);
   assert.equal(result.sessionId, "session-new");
   assert.equal(result.result, "Done from Harness.");
