@@ -100,15 +100,15 @@ test("reports Native, Headless, and Unknown execution distinctly", () => {
 test("public status exposes non-sensitive update runtime only", () => {
   const status = publicRuntimeStatus({
     connector: "loaded",
-    currentVersion: "0.3.1",
-    latestVersion: "0.3.2",
+    currentVersion: "0.3.2",
+    latestVersion: "0.3.3",
     updateState: "waiting-idle",
     lastCheckedAt: "2026-10-05T12:00:00.000Z",
     restartRequired: false,
     lastUpdateError: null,
   });
-  assert.equal(status.currentVersion, "0.3.1");
-  assert.equal(status.latestVersion, "0.3.2");
+  assert.equal(status.currentVersion, "0.3.2");
+  assert.equal(status.latestVersion, "0.3.3");
   assert.equal(status.updateState, "waiting-idle");
   assert.equal(status.restartRequired, false);
   assert.equal(Object.hasOwn(status, "token"), false);

@@ -1,8 +1,8 @@
 # DeepSeek Worker Connector
 
-DeepSeek Harness 原生本地 Worker Connector。当前正式版本：**0.3.1**。
+DeepSeek Harness 原生本地 Worker Connector。当前正式版本：**0.3.2**。
 
-0.3.1 普通用户路径：首次从受信任 GitHub 地址安装，选择 Harness Workspace 并完成 ChatGPT 设备配对；以后 Connector 自动检查正式版本，并通过 Harness 官方 Plugin Manager 更新自己。更新安装完成后只需要重启 DeepSeek Harness。
+0.3.2 普通用户路径：首次从受信任 GitHub 地址安装，选择 Harness Workspace 并完成 ChatGPT 设备配对；以后 Connector 自动检查正式版本，并通过 Harness 官方 Plugin Manager 更新自己。更新安装完成后只需要重启 DeepSeek Harness。
 
 普通用户不再需要删除插件、重新输入 GitHub 地址、重新配置 Workspace/Token 或重新设备配对。
 

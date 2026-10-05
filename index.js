@@ -300,7 +300,7 @@ export class WorkerControlService extends TypertRemoteService {
         token_hash: hashWorkerToken(token),
         hostname: hostname(),
         workspace_allowlist: config.authorizedWorkspaceIds,
-        client_version: "0.3.1",
+        client_version: "0.3.2",
       }, AbortSignal.timeout(10000));
 
       const state = normalizePairingState(started.state || "pending");
@@ -542,7 +542,7 @@ export class WorkerControlService extends TypertRemoteService {
       this.runtime.pairing = "paired";
       this.runtime.lastError = config.trustedWorkspaceMode
         ? null
-        : "当前为受限工作区模式；0.3.1 不领取远程执行任务。";
+        : "当前为受限工作区模式；0.3.2 不领取远程执行任务。";
       this.runtime.workerId = config.workerId;
       this.runtime.workspaceCount = config.authorizedWorkspaceIds.length;
       return {
@@ -550,7 +550,7 @@ export class WorkerControlService extends TypertRemoteService {
         code: "connected",
         message: config.trustedWorkspaceMode
           ? "连接成功。授权 Harness Workspace 已报告给 Cloud。"
-          : "连接成功；当前处于受限工作区模式，0.3.1 不领取远程执行任务。",
+          : "连接成功；当前处于受限工作区模式，0.3.2 不领取远程执行任务。",
         workerId: config.workerId,
       };
     } catch (error) {
@@ -621,7 +621,7 @@ async function runWorker(ctx, input, runtime, signal) {
       }
       if (!config.trustedWorkspaceMode) {
         runtime.worker = "paused";
-        runtime.lastError = "当前为受限工作区模式；0.3.1 不领取远程执行任务。";
+        runtime.lastError = "当前为受限工作区模式；0.3.2 不领取远程执行任务。";
         registeredSignature = "";
         registeredToken = undefined;
         await sleep(pollIntervalMs, signal);

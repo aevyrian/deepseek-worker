@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.2
+
+### Self Update
+
+#### Added
+
+- 正式发布 Harness Connector 自更新：默认检查 stable 更新，并在 Worker 完全空闲后安装。
+- 通过 Harness 官方 Plugin Manager 替换 Connector package，成功后要求重启 Harness。
+- 只接受受信任 GitHub 仓库中的版本 tag，并在安装前解析为不可变 commit SHA、验证 package 元数据。
+
+#### Preserved
+
+- Credentials、Workspace 授权、设备配对身份、Native Session 与 continue/rework 状态。
+- Cloud、D1、MCP 与现有 pairing protocol。
+
+#### Validation
+
+- Windows GitHub Actions / Node 22 workflow 通过；更新器、Host Remote、配对、Workspace 与 Session 覆盖纳入永久测试流程。
+- JavaScript syntax checks 与 `npm test` 在 PR CI 中通过。
+
 ## 0.3.1
 
 ### Self Update

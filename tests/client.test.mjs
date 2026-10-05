@@ -53,8 +53,8 @@ function goodRemoteNamespace() {
       return {
         ok: true,
         value: {
-          currentVersion: "0.3.1",
-          latestVersion: "0.3.1",
+          currentVersion: "0.3.2",
+          latestVersion: "0.3.2",
           updateState: "up-to-date",
           restartRequired: false,
         },

@@ -1,8 +1,8 @@
-# DeepSeek Worker Connector 0.3.1 设计
+# DeepSeek Worker Connector 0.3.2 设计
 
 ## 1. 本轮边界
 
-0.3.1 是 Connector patch release。Cloud Site、D1、MCP、`/api/worker/*` 与现有 Cloud pairing protocol 不在修改范围。
+0.3.2 在 0.3.1 pairing/UI 基线上增加 Connector 自更新。Cloud Site、D1、MCP、`/api/worker/*` 与现有 Cloud pairing protocol 不在修改范围。
 
 保留 0.3.0 的 WorkspaceId 与 per-worker pairing 方向，本轮修正 Host Credentials 真实契约、Remote failure boundary 与普通用户 UI。
 
@@ -155,7 +155,7 @@ Credentials mock 使用官方 `{ value, source }` shape。
 Browser tests 覆盖 3 秒 polling、reopen、setup URL、Token 不进 URL/持久存储、普通 UI 与高级兼容入口。
 
 
-## 12. 0.3.1 Self Update
+## 12. 0.3.2 Self Update
 
 自更新与 Worker/Pairing 解耦。UpdateProvider 只产生经过验证的 version/channel/source/ref metadata，不产生或执行命令。
 
