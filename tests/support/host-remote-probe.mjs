@@ -111,6 +111,13 @@ globalThis.fetch = async (url, init = {}) => {
   requests.push({ url: parsed.href, path: parsed.pathname, headers: { ...(init.headers || {}) }, body });
 
   if (parsed.pathname === "/api/pair/start") {
+    if (typeof startMode === "number") {
+      return new Response(JSON.stringify({ error: "test_failure" }), {
+        status: startMode,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (startMode === "network") throw new Error("fetch failed");
     if (startMode === "unavailable") {
       return new Response(JSON.stringify({ code: "not_found" }), {
         status: 404,
@@ -216,17 +223,33 @@ try {
   const pending = await gatewayInvoke(ctx, "deepseekWorkerConnector", "pairingStatus");
   assert.equal(pending.ok, true);
   assert.equal(pending.state, "pending");
+  const pendingAgain = await gatewayInvoke(ctx, "deepseekWorkerConnector", "beginPairing");
+  assert.equal(pendingAgain.state, "pending");
+  assert.equal(requests.filter((request) => request.path === "/api/pair/start").length, 1);
+  assert.equal(ctx.credentials.peek(), stored.value);
 
   pairingState = "paired";
   const paired = await gatewayInvoke(ctx, "deepseekWorkerConnector", "pairingStatus");
   assert.equal(paired.ok, true);
   assert.equal(paired.state, "paired");
+  const pairedAgain = await gatewayInvoke(ctx, "deepseekWorkerConnector", "beginPairing");
+  assert.equal(pairedAgain.state, "paired");
+  assert.equal(requests.filter((request) => request.path === "/api/pair/start").length, 1);
+  assert.equal(ctx.credentials.peek(), stored.value);
 
   pairingState = "expired";
   const expired = await gatewayInvoke(ctx, "deepseekWorkerConnector", "pairingStatus");
   assert.equal(expired.ok, false);
   assert.equal(expired.state, "expired");
   assert.equal(expired.code, "pairing_expired");
+
+  for (const mode of [409, 429, 503, "network"]) {
+    startMode = mode;
+    const failed = await gatewayInvoke(ctx, "deepseekWorkerConnector", "beginPairing");
+    assert.equal(failed.ok, false);
+    assert.equal(ctx.credentials.peek(), stored.value, `Token changed after ${mode}`);
+  }
+  startMode = "ok";
 
   pairingState = "paired";
   const disconnected = await gatewayInvoke(ctx, "deepseekWorkerConnector", "disconnectPairing");

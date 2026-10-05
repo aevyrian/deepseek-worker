@@ -208,6 +208,13 @@ export class WorkerControlService extends TypertRemoteService {
   }
 
   async beginPairing() {
+    if (this.beginPairingInFlight) return this.beginPairingInFlight;
+    this.beginPairingInFlight = this.startPairingOnce();
+    try { return await this.beginPairingInFlight; }
+    finally { this.beginPairingInFlight = null; }
+  }
+
+  async startPairingOnce() {
     let config;
     try {
       config = currentConfig(this.input);
@@ -275,23 +282,19 @@ export class WorkerControlService extends TypertRemoteService {
       };
     }
 
-    const token = generateWorkerToken();
-
+    let existingToken;
     try {
-      await saveWorkerToken(credentials, token);
+      existingToken = await resolveWorkerToken(credentials);
     } catch (error) {
-      return {
-        ok: false,
-        code: "credential_write_failed",
-        state: "error",
-        message: `保存本机 Worker 凭据失败：${redactSecret(error, token)}`,
-      };
+      return { ok: false, code: "credential_resolve_failed", state: "error", message: `读取 Harness Worker 凭据失败：${redactSecret(error)}` };
+    }
+    if (existingToken) {
+      const current = await this.pairingStatus();
+      if (current.ok && (current.state === "paired" || current.state === "pending")) return current;
+      if (!["unpaired", "expired", "revoked"].includes(current.state)) return current;
     }
 
-    this.runtime.credential = "configured";
-    this.runtime.worker = "paused";
-    this.runtime.pairing = "pending";
-    this.runtime.lastError = null;
+    const token = generateWorkerToken();
 
     try {
       const started = await pairingRequest(config, undefined, "start", {
@@ -317,7 +320,15 @@ export class WorkerControlService extends TypertRemoteService {
         };
       }
 
+      try {
+        await saveWorkerToken(credentials, token);
+      } catch (error) {
+        return { ok: false, code: "credential_write_failed", state: "error", message: `保存本机 Worker 凭据失败：${redactSecret(error, token)}` };
+      }
+
       this.runtime.pairing = state;
+      this.runtime.credential = "configured";
+      this.runtime.worker = "paused";
       this.runtime.pairingCode = pairingCode;
       this.runtime.approvalUrl = approvalUrl;
       this.runtime.pairingExpiresAt = expiresAt;
@@ -589,6 +600,9 @@ async function runWorker(ctx, input, runtime, signal) {
   let registeredToken;
   let registeredSignature = "";
   let lastHeartbeatAt = 0;
+  let checkedToken;
+  let checkedEndpoint;
+  let checkedPairingState;
 
   while (!signal.aborted) {
     let pollIntervalMs = 4000;
@@ -623,6 +637,30 @@ async function runWorker(ctx, input, runtime, signal) {
         continue;
       }
       runtime.credential = "configured";
+
+      if (checkedToken !== token || checkedEndpoint !== config.endpoint || checkedPairingState !== "paired") {
+        const pair = await pairingRequest(config, token, "status", {}, signal).catch((error) => {
+          const mapped = classifyPairingError(error);
+          if (["unpaired", "revoked", "expired"].includes(mapped.state)) return { state: mapped.state };
+          throw error;
+        });
+        checkedToken = token;
+        checkedEndpoint = config.endpoint;
+        checkedPairingState = normalizePairingState(pair.state);
+        runtime.pairing = checkedPairingState;
+        runtime.cloud = "online";
+        if (checkedPairingState !== "paired") {
+          runtime.worker = "paused";
+          runtime.lastError = checkedPairingState === "pending"
+            ? "等待浏览器确认连接。"
+            : "本机凭据已失效，请在 Connector 中重新连接 ChatGPT。";
+          registeredSignature = "";
+          registeredToken = undefined;
+          await sleep(Math.max(pollIntervalMs, 30000), signal);
+          continue;
+        }
+        runtime.lastError = null;
+      }
 
       const hasConfiguredWorkspaces = config.authorizedWorkspaceIds.length > 0;
       const hasMissingWorkspaces = workspaces.missing.length > 0;
@@ -708,6 +746,11 @@ async function runWorker(ctx, input, runtime, signal) {
       runtime.worker = "error";
       if (mapped.code === "pairing_required") runtime.pairing = "pending";
       if (mapped.code === "credential_rejected") runtime.pairing = "unpaired";
+      if (mapped.code === "credential_rejected") {
+        checkedToken = token;
+        checkedEndpoint = currentConfig(input).endpoint;
+        checkedPairingState = "unpaired";
+      }
       runtime.lastError = mapped.message;
       ctx.logger.warn("deepseek-worker connector loop: %s", redactSecret(error, token));
     }
