@@ -26,6 +26,7 @@ import {
 import { authorizedWorkspaceState, workspaceHeartbeatPayload } from "./lib/workspaces.mjs";
 import { executeNativeSession } from "./lib/native-session.mjs";
 import { registerOrchestratorPreset } from "./lib/orchestrator-preset.mjs";
+import { migrateLegacyOrchestratorBundles } from "./lib/migration.mjs";
 import {
   classifyPairingError,
   credentialInfo,
@@ -146,6 +147,18 @@ export class WorkerControlService extends TypertRemoteService {
     ctx.effect(() => {
       let unregister = null;
       const ready = (async () => {
+        const pluginManager = currentPluginManager(ctx);
+        if (pluginManager !== undefined) {
+          const migration = await migrateLegacyOrchestratorBundles(pluginManager, ctx.logger);
+          if (migration.status === "restart-required") {
+            ctx.logger.info("deepseek-worker: legacy total-control preset bundle disabled; restart Harness once to finish cleanup");
+          } else if (migration.status === "failed") {
+            ctx.logger.warn("deepseek-worker: legacy total-control preset cleanup was incomplete; Connector will continue with runtime preset registration");
+          } else if (migration.removed.length > 0) {
+            ctx.logger.info("deepseek-worker: removed legacy total-control preset bundle");
+          }
+        }
+
         const registry = optionalService(ctx, "agentPresets");
         if (registry === undefined) {
           ctx.logger.warn("deepseek-worker: agent preset registry unavailable; total-control preset not registered");
@@ -153,7 +166,7 @@ export class WorkerControlService extends TypertRemoteService {
         }
         unregister = await registerOrchestratorPreset(registry);
       })().catch((error) => {
-        ctx.logger.warn("deepseek-worker: failed to register total-control preset: %s", redactSecret(error));
+        ctx.logger.warn("deepseek-worker: failed to prepare total-control preset: %s", redactSecret(error));
       });
 
       return async () => {
