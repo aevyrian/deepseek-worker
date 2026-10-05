@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
   CONNECTOR_PACKAGE,
   CONNECTOR_VERSION,
@@ -101,6 +102,11 @@ function pluginManager({
   };
 }
 
+test("updater current version stays synchronized with package.json", async () => {
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(pkg.version, CONNECTOR_VERSION);
+});
+
 test("Semantic Version comparison follows SemVer precedence", () => {
   assert.ok(parseSemver("0.3.1"));
   assert.ok(parseSemver("0.3.2-preview.1"));
@@ -154,6 +160,13 @@ test("illegal semantic versions are rejected", () => {
 test("downgrades and same-version candidates are skipped", () => {
   assert.equal(selectUpdateCandidate([manifest("0.3.0")], "0.3.1", "stable"), null);
   assert.equal(selectUpdateCandidate([manifest("0.3.1")], "0.3.1", "stable"), null);
+});
+
+test("trusted installed Git source forms are accepted but arbitrary hosts are not", () => {
+  assert.equal(isTrustedSource(TRUSTED_SOURCE), true);
+  assert.equal(isTrustedSource("github:aevyrian/deepseek-worker#v0.3.1"), true);
+  assert.equal(isTrustedSource("git+https://github.com/aevyrian/deepseek-worker.git#v0.3.1"), true);
+  assert.equal(isTrustedSource("https://example.com/aevyrian/deepseek-worker.git"), false);
 });
 
 test("manifest source cannot carry its own branch or ref", () => {
@@ -353,6 +366,28 @@ test("Plugin Manager update failure keeps the current Connector runtime usable",
   assert.equal(status.restartRequired, false);
   assert.equal(status.updateState, "failed");
   assert.match(status.lastUpdateError, /当前 Connector 继续运行/);
+});
+
+test("bundle validation failure leaves the running Connector on the current version", async () => {
+  const runtime = createUpdateRuntime();
+  const status = await performUpdateCheck({
+    runtime,
+    config: { autoUpdate: true, updateChannel: "stable" },
+    pluginManager: pluginManager({
+      result: {
+        changed: false,
+        application: "failed",
+        stage: "install",
+        target: TRUSTED_SOURCE,
+        error: { code: "bundle-invalid" },
+      },
+    }),
+    harnessVersion: "1.0.0",
+    fetchImpl: cloudOnly(manifest("0.3.2")),
+  });
+  assert.equal(status.currentVersion, "0.3.1");
+  assert.equal(status.restartRequired, false);
+  assert.equal(status.updateState, "failed");
 });
 
 test("official incompatibility result is surfaced without replacing runtime state", async () => {
