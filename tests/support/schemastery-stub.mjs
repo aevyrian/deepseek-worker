@@ -16,4 +16,6 @@ export default {
   number() { return chain(); },
   boolean() { return chain(); },
   array() { return chain(); },
+  const() { return chain(); },
+  union() { return chain(); },
 };
