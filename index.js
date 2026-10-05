@@ -25,6 +25,7 @@ import {
 } from "./lib/protocol.mjs";
 import { authorizedWorkspaceState, workspaceHeartbeatPayload } from "./lib/workspaces.mjs";
 import { executeNativeSession } from "./lib/native-session.mjs";
+import { registerOrchestratorPreset } from "./lib/orchestrator-preset.mjs";
 import {
   classifyPairingError,
   credentialInfo,
@@ -141,6 +142,25 @@ export class WorkerControlService extends TypertRemoteService {
       isWorkerBusy: () => this.runtime.workerBusy === true,
       logger: ctx.logger,
     });
+
+    ctx.effect(() => {
+      let unregister = null;
+      const ready = (async () => {
+        const registry = optionalService(ctx, "agentPresets");
+        if (registry === undefined) {
+          ctx.logger.warn("deepseek-worker: agent preset registry unavailable; total-control preset not registered");
+          return;
+        }
+        unregister = await registerOrchestratorPreset(registry);
+      })().catch((error) => {
+        ctx.logger.warn("deepseek-worker: failed to register total-control preset: %s", redactSecret(error));
+      });
+
+      return async () => {
+        await ready;
+        if (typeof unregister === "function") await unregister();
+      };
+    }, "deepseek-worker-connector: orchestrator preset");
 
     ctx.effect(() => {
       const lifecycle = new AbortController();

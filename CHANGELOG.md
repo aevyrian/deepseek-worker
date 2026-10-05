@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3-preview.7
+
+- 恢复 Harness 预设列表中的“总控执行模式”，同时保持 Connector 可正常停用和卸载。
+- 不再把 `@deepseek-ai/dsh-agent-preset` 作为 bundle 的第二个常驻 Loader 行；Connector 启动时通过 Harness 官方 Agent Preset Registry 动态注册 `orchestrator-worker`，停用/卸载时由同一生命周期自动注销。
+- 重新安装并启用 Connector 后，“总控执行模式”会自动恢复。
+- ChatGPT 远程 Worker 任务继续使用已验证稳定的 Native Session + 每任务总控执行契约，不因预设注册失败而阻断核心指挥链。
+- 预设继续移除 Schedule 硬依赖，保留文件、Shell、搜索、子 Agent、Web 等核心执行能力。
+- 新增动态 preset 注册、重复注册和 disposer 生命周期回归测试。
+
 ## 0.3.3-preview.6
 
 - 修复 Connector 组合包无法直接卸载的问题：不再把常驻 `@deepseek-ai/dsh-agent-preset` 作为 Connector bundle 的第二个运行组件。
