@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import WorkerControlService from "../../index.js";
+import WorkerControlService, { processLease } from "../../index.js";
 import { remoteMethods } from "@deepseek-ai/dsh-typert-protocol";
 
 class HostContext {
@@ -7,6 +7,7 @@ class HostContext {
     this.reflect = { props: {} };
     this.services = new Map();
     this.cleanups = [];
+    this.listeners = new Map();
     this.logger = { warn() {}, error() {} };
     this.workspaceRegistry = {
       list: () => [{ id: "workspace-a", path: "E:\\Project", sessionIds: [] }],
@@ -50,6 +51,17 @@ class HostContext {
 
   get(key) {
     return this.services.get(key);
+  }
+
+  on(name, listener) {
+    const listeners = this.listeners.get(name) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(name, listeners);
+    return () => listeners.delete(listener);
+  }
+
+  emit(name, ...args) {
+    for (const listener of this.listeners.get(name) ?? []) listener(...args);
   }
 
   effect(setup) {
@@ -145,6 +157,13 @@ globalThis.fetch = async (url, init = {}) => {
     });
   }
 
+  if (parsed.pathname === "/api/worker/events" || parsed.pathname === "/api/worker/result" || parsed.pathname === "/api/worker/failure" || parsed.pathname === "/api/worker/lease/renew") {
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
   throw new Error(`unexpected fetch ${parsed.href}`);
 };
 
@@ -225,6 +244,65 @@ try {
   const connectionTest = await gatewayInvoke(ctx, "deepseekWorkerConnector", "test");
   assert.equal(connectionTest.ok, false);
   assert.equal(connectionTest.code, "token_missing");
+
+  const nativeEvents = [];
+  const nativeSession = {
+    snapshotEvents: () => [...nativeEvents],
+  };
+  const nativeAgent = { session: nativeSession };
+  let createCalls = 0;
+  ctx.registerService("sessionController", {
+    async create(request) {
+      createCalls += 1;
+      assert.deepEqual(request, { workspaceId: "workspace-a" });
+      return { sessionId: "session-e2e" };
+    },
+    async resolveAgent(sessionId) {
+      assert.equal(sessionId, "session-e2e");
+      return { agent: nativeAgent };
+    },
+    async prompt(request) {
+      assert.equal(request.sessionId, "session-e2e");
+      assert.deepEqual(request.content, [{ type: "text", text: "Task:\nRead OS" }]);
+      const assistant = {
+        type: "assistant/message", seq: 1,
+        data: { message: { content: [{ type: "text", text: "Windows" }] } },
+      };
+      const turnEnd = { type: "turn/end", seq: 2, data: { reason: "completed" } };
+      nativeEvents.push(assistant, turnEnd);
+      queueMicrotask(() => ctx.emit("session/event", nativeSession, turnEnd));
+      return { accepted: true };
+    },
+  });
+  const workerConfig = {
+    endpoint: "https://deepseek-worker.sxfdgan.chatgpt.site/api/worker",
+    workerId: "worker-test",
+    authorizedWorkspaceIds: ["workspace-a"],
+    trustedWorkspaceMode: true,
+    leaseRenewIntervalMs: 5000,
+    leaseWaitTimeoutMs: 1000,
+  };
+  const task = { id: "task-native", workspace_id: "workspace-a", prompt: "Read OS" };
+  await processLease(ctx, workerConfig, "test-token", task, new AbortController().signal);
+  assert.equal(createCalls, 1);
+  const nativeRequests = requests.filter((request) => request.path.startsWith("/api/worker/"));
+  assert.deepEqual(nativeRequests.map((request) => request.path), [
+    "/api/worker/events", "/api/worker/result",
+  ]);
+  assert.equal(nativeRequests[0].body.event, "local_started");
+  assert.equal(nativeRequests[1].body.result, "Windows");
+  assert.equal(nativeRequests[1].body.session_id, "session-e2e");
+  assert.equal(nativeRequests[1].body.metadata.executor, "harness-native");
+  assert.equal(nativeRequests[1].body.metadata.workspace_id, "workspace-a");
+
+  requests.length = 0;
+  ctx.registerService("sessionController", {
+    async create() { throw new Error("Native Session failed"); },
+  });
+  await processLease(ctx, workerConfig, "test-token", { ...task, id: "task-native-fail" }, new AbortController().signal);
+  const failureRequest = requests.find((request) => request.path === "/api/worker/failure");
+  assert.ok(failureRequest, "Native Session exceptions must use the normal failure upload path");
+  assert.match(failureRequest.body.error, /Native Session failed/);
 } finally {
   globalThis.fetch = originalFetch;
   await ctx.dispose();

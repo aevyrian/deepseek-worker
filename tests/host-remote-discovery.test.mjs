@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-test("Gateway-style Host discovery finds the real Connector Remote owner on the Loader context", async () => {
+test("Host discovery and Native processLease execute the imported Session runtime on the Loader context", async () => {
   const loader = new URL("./support/host-loader.mjs", import.meta.url).href;
   const probe = fileURLToPath(new URL("./support/host-remote-probe.mjs", import.meta.url));
   const child = spawn(process.execPath, ["--no-warnings", "--experimental-loader", loader, probe], {
