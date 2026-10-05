@@ -23,6 +23,7 @@ import {
   workerRequest,
   workspaceForTask,
 } from "./lib/protocol.mjs";
+import { authorizedWorkspaceState, workspaceHeartbeatPayload } from "./lib/workspaces.mjs";
 import {
   classifyPairingError,
   credentialInfo,
@@ -118,11 +119,7 @@ function initialRuntime() {
 }
 
 function workspaceState(config, registry) {
-  const availableIds = registry.list().map((workspace) => String(workspace.id));
-  return {
-    missing: missingAuthorizedWorkspaceIds(config.authorizedWorkspaceIds, availableIds),
-    count: config.authorizedWorkspaceIds.length,
-  };
+  return authorizedWorkspaceState(config.authorizedWorkspaceIds, registry.list());
 }
 
 export class WorkerControlService extends TypertRemoteService {
@@ -299,8 +296,8 @@ export class WorkerControlService extends TypertRemoteService {
       const started = await pairingRequest(config, undefined, "start", {
         token_hash: hashWorkerToken(token),
         hostname: hostname(),
-        workspace_allowlist: config.authorizedWorkspaceIds,
-        client_version: "0.3.2",
+        ...workspaceHeartbeatPayload(workspaces),
+        client_version: CONNECTOR_VERSION,
       }, AbortSignal.timeout(10000));
 
       const state = normalizePairingState(started.state || "pending");
@@ -534,7 +531,8 @@ export class WorkerControlService extends TypertRemoteService {
     try {
       await workerRequest(config, token, "register", {
         hostname: hostname(),
-        workspace_allowlist: config.authorizedWorkspaceIds,
+        ...workspaceHeartbeatPayload(workspaces),
+        client_version: CONNECTOR_VERSION,
       }, AbortSignal.timeout(10000));
       this.runtime.credential = "configured";
       this.runtime.cloud = "online";
@@ -542,7 +540,7 @@ export class WorkerControlService extends TypertRemoteService {
       this.runtime.pairing = "paired";
       this.runtime.lastError = config.trustedWorkspaceMode
         ? null
-        : "当前为受限工作区模式；0.3.2 不领取远程执行任务。";
+        : "当前为受限工作区模式；Connector 不领取远程执行任务。";
       this.runtime.workerId = config.workerId;
       this.runtime.workspaceCount = config.authorizedWorkspaceIds.length;
       return {
@@ -550,7 +548,7 @@ export class WorkerControlService extends TypertRemoteService {
         code: "connected",
         message: config.trustedWorkspaceMode
           ? "连接成功。授权 Harness Workspace 已报告给 Cloud。"
-          : "连接成功；当前处于受限工作区模式，0.3.2 不领取远程执行任务。",
+          : "连接成功；当前处于受限工作区模式，Connector 不领取远程执行任务。",
         workerId: config.workerId,
       };
     } catch (error) {
@@ -603,31 +601,6 @@ async function runWorker(ctx, input, runtime, signal) {
       runtime.workspaceCount = workspaces.count;
       runtime.execution = executionMode(controller !== undefined);
 
-      if (config.authorizedWorkspaceIds.length === 0) {
-        runtime.worker = "paused";
-        runtime.lastError = "未授权 Harness Workspace；Connector 已安全暂停。";
-        registeredSignature = "";
-        registeredToken = undefined;
-        await sleep(pollIntervalMs, signal);
-        continue;
-      }
-      if (workspaces.missing.length > 0) {
-        runtime.worker = "paused";
-        runtime.lastError = `授权 Workspace 已不存在：${workspaces.missing.join(", ")}。`;
-        registeredSignature = "";
-        registeredToken = undefined;
-        await sleep(pollIntervalMs, signal);
-        continue;
-      }
-      if (!config.trustedWorkspaceMode) {
-        runtime.worker = "paused";
-        runtime.lastError = "当前为受限工作区模式；0.3.2 不领取远程执行任务。";
-        registeredSignature = "";
-        registeredToken = undefined;
-        await sleep(pollIntervalMs, signal);
-        continue;
-      }
-
       const credentials = currentCredentials(ctx);
       if (credentials === undefined) {
         runtime.credential = "unconfigured";
@@ -650,33 +623,69 @@ async function runWorker(ctx, input, runtime, signal) {
       }
       runtime.credential = "configured";
 
+      const hasConfiguredWorkspaces = config.authorizedWorkspaceIds.length > 0;
+      const hasMissingWorkspaces = workspaces.missing.length > 0;
+      const claimEnabled = hasConfiguredWorkspaces
+        && workspaces.count > 0
+        && !hasMissingWorkspaces
+        && config.trustedWorkspaceMode;
+      const presenceState = claimEnabled ? "online" : "paused";
+      const workspacePayload = workspaceHeartbeatPayload(workspaces);
+
       const registrationSignature = JSON.stringify({
         endpoint: config.endpoint,
         workerId: config.workerId,
-        workspaceIds: [...config.authorizedWorkspaceIds].sort(),
+        workspaceIds: [...workspaces.workspaceIds].sort(),
+        workspaces: workspacePayload.workspaces,
+        trustedWorkspaceMode: config.trustedWorkspaceMode,
+        clientVersion: CONNECTOR_VERSION,
       });
       if (registeredSignature !== registrationSignature || registeredToken !== token) {
         await workerRequest(config, token, "register", {
           hostname: hostname(),
-          workspace_allowlist: config.authorizedWorkspaceIds,
+          state: presenceState,
+          ...workspacePayload,
+          client_version: CONNECTOR_VERSION,
         }, signal);
         registeredSignature = registrationSignature;
         registeredToken = token;
         lastHeartbeatAt = 0;
         runtime.cloud = "online";
-        runtime.worker = "online";
+        runtime.worker = presenceState;
         runtime.pairing = "paired";
-        runtime.lastError = null;
       }
 
       if (Date.now() - lastHeartbeatAt >= config.heartbeatIntervalMs) {
-        await workerRequest(config, token, "heartbeat", { state: "online" }, signal);
+        await workerRequest(config, token, "heartbeat", {
+          state: presenceState,
+          ...workspacePayload,
+          client_version: CONNECTOR_VERSION,
+        }, signal);
         lastHeartbeatAt = Date.now();
         runtime.lastHeartbeat = new Date(lastHeartbeatAt).toISOString();
         runtime.cloud = "online";
-        runtime.worker = "online";
-        runtime.lastError = null;
+        runtime.worker = presenceState;
       }
+
+      if (!hasConfiguredWorkspaces) {
+        runtime.worker = "paused";
+        runtime.lastError = "未授权 Harness Workspace；Connector 已安全暂停。";
+        await sleep(pollIntervalMs, signal);
+        continue;
+      }
+      if (hasMissingWorkspaces) {
+        runtime.worker = "paused";
+        runtime.lastError = `授权 Workspace 已不存在：${workspaces.missing.join(", ")}。`;
+        await sleep(pollIntervalMs, signal);
+        continue;
+      }
+      if (!config.trustedWorkspaceMode) {
+        runtime.worker = "paused";
+        runtime.lastError = "当前为受限工作区模式；Connector 不领取远程执行任务。";
+        await sleep(pollIntervalMs, signal);
+        continue;
+      }
+      runtime.lastError = null;
 
       if (["waiting-idle", "installing"].includes(runtime.updateState)) {
         runtime.worker = "paused";
