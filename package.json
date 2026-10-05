@@ -2,7 +2,7 @@
   "name": "deepseek-worker-connector",
   "version": "0.3.3-preview.5",
   "private": true,
-  "description": "DeepSeek Harness 原生连接插件：将本机 Harness Workspace 接入 ChatGPT DeepSeek Worker 云端调度系统。",
+  "description": "让 ChatGPT 连接并指挥本机 DeepSeek Harness 执行 Workspace 任务的 Connector。",
   "type": "module",
   "main": "index.js",
   "exports": {
