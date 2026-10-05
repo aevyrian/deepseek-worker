@@ -30,6 +30,13 @@
 - Native Session / continue / rework。
 - Cloud Site / D1 / MCP / /api/worker/* 均未修改。
 
+#### Validation
+
+- 正式 Windows GitHub Actions / Node 22 workflow 通过。
+- JavaScript / MJS syntax checks 全通过，包含 `lib/update.mjs`。
+- `npm test`：**75/75 pass，0 fail**。
+- 覆盖 SemVer、stable/preview、可信 source、tag→commit、package metadata、busy fence、Plugin Manager failure/compatibility 与 Remote/UI 状态。
+
 ### Pairing / UI fixes
 
 #### Fixed
