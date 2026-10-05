@@ -72,7 +72,7 @@ async function mountClient({ remoteNamespace, credentials }) {
         assert.equal(contribution.package, "deepseek-worker-connector");
         assert.deepEqual(
           Array.from(contribution.descriptors, (descriptor) => descriptor.method),
-          ["status", "generateToken", "test"],
+          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"],
         );
         mounted = true;
         return async () => { remoteDisposed = true; mounted = false; };
@@ -223,4 +223,15 @@ test("Token UI no longer maps Host Remote failures to generic config-save failur
   assert.match(source, /Credential provider 不可写/);
   assert.match(source, /Token 保存失败/);
   assert.doesNotMatch(source, /catch \{\s*setTokenMessage\(t\("saveFailed"\)\)/);
+});
+
+
+test("0.3.0 exposes one-click pairing without requiring a Site Secret in the normal UI", async () => {
+  const { source } = await loadClientPlugin();
+  assert.match(source, /连接 DeepSeek Worker/);
+  assert.match(source, /beginPairing/);
+  assert.match(source, /pairingStatus/);
+  assert.match(source, /disconnectPairing/);
+  assert.match(source, /Site 后台配置 Secret/);
+  assert.doesNotMatch(source, /同步更新 Site Secret LOCAL_WORKER_TOKEN/);
 });

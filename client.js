@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
 
     const contribution = {
       package: "deepseek-worker-connector",
-      descriptors: ["status", "generateToken", "test"].map((method) => ({
+      descriptors: ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"].map((method) => ({
         id: `deepseek-worker-connector#deepseekWorkerConnector/${method}`,
         service: "deepseekWorkerConnectorControl",
         namespace: "deepseekWorkerConnector",
@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
     };
 
     const zh = {
-      summary: "绑定 Harness 原生 Workspace、配置 Worker Token 与运行状态",
+      summary: "绑定 Harness 原生 Workspace，并一键配对 DeepSeek Worker Cloud",
       cloud: "云端连接",
       endpoint: "云端地址",
       workerId: "Worker ID",
@@ -37,8 +37,21 @@ window.__ModuleLoader__.load({
       saveToken: "保存到 Harness",
       copy: "复制",
       copied: "已复制",
-      tokenHint: "Token 保存后无法再次查看。遗失时请重新生成，并同步更新 Site Secret LOCAL_WORKER_TOKEN。",
-      tokenSiteHint: "请把同一个 Token 配置到 DeepSeek Worker Site Secret：LOCAL_WORKER_TOKEN。",
+      tokenHint: "高级兼容模式：手动 Token 仅用于旧 Cloud 或诊断。0.3.0 正常配对不需要在 Site 后台配置 Secret。",
+      tokenSiteHint: "手动 Token 不会上传到页面或 Git；正式配对请使用上方“连接 DeepSeek Worker”。",
+      pairing: "设备配对",
+      pairConnect: "连接 DeepSeek Worker",
+      pairConnecting: "正在创建配对…",
+      pairCheck: "检查配对状态",
+      pairDisconnect: "断开配对",
+      pairPending: "等待你确认配对",
+      pairPaired: "已配对",
+      pairUnpaired: "未配对",
+      pairUnknown: "状态未知",
+      pairCode: "配对码",
+      pairOpen: "打开配对页面",
+      pairHint: "首次连接会在本机自动生成独立 Worker 凭据并保存到 Harness Credentials。云端只保存凭据哈希，不需要共享全局 Site Secret。",
+      legacyToken: "高级：手动 Token（兼容旧 Cloud / 诊断）",
       status: "Harness 状态",
       connector: "Connector",
       harness: "Execution",
@@ -126,6 +139,19 @@ window.__ModuleLoader__.load({
       saving: "Saving…",
       saved: "Configuration saved and applied live.",
       saveFailed: "Could not save configuration. Refresh and retry.",
+      pairing: "Device pairing",
+      pairConnect: "Connect DeepSeek Worker",
+      pairConnecting: "Starting pairing…",
+      pairCheck: "Check pairing status",
+      pairDisconnect: "Disconnect",
+      pairPending: "Waiting for approval",
+      pairPaired: "Paired",
+      pairUnpaired: "Not paired",
+      pairUnknown: "Unknown",
+      pairCode: "Pairing code",
+      pairOpen: "Open pairing page",
+      pairHint: "First connection creates a unique local Worker credential automatically. The Cloud stores only its hash; no shared Site secret is required.",
+      legacyToken: "Advanced: manual Token (legacy Cloud / diagnostics)",
     };
 
     const sectionStyle = {
@@ -179,9 +205,9 @@ window.__ModuleLoader__.load({
     }
 
     function stateDot(value) {
-      if (["loaded", "configured", "online", "native"].includes(value)) return "done";
-      if (value === "detecting") return "ongoing";
-      if (["paused", "headless", "untested", "unknown"].includes(value)) return "warning";
+      if (["loaded", "configured", "online", "native", "paired"].includes(value)) return "done";
+      if (["detecting", "pending"].includes(value)) return "ongoing";
+      if (["paused", "headless", "untested", "unknown", "unpaired"].includes(value)) return "warning";
       if (["offline", "unauthenticated", "unconfigured", "error"].includes(value)) return "error";
       return "idle";
     }
@@ -220,6 +246,9 @@ window.__ModuleLoader__.load({
       const [tokenInput, setTokenInput] = useState("");
       const [generatedToken, setGeneratedToken] = useState("");
       const [tokenMessage, setTokenMessage] = useState("");
+      const [pairing, setPairing] = useState(undefined);
+      const [pairingBusy, setPairingBusy] = useState(false);
+      const [pairingMessage, setPairingMessage] = useState("");
       const [testResult, setTestResult] = useState(undefined);
       const [testing, setTesting] = useState(false);
       const [saving, setSaving] = useState(false);
@@ -345,6 +374,53 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const connectPairing = async () => {
+        setPairingBusy(true);
+        setPairingMessage("");
+        try {
+          const saved = await saveConfig();
+          if (!saved) return;
+          const result = await actions.beginPairing();
+          setPairing(result);
+          if (!result.ok) { setPairingMessage(result.message || "配对失败"); return; }
+          if (result.approvalUrl) window.open(result.approvalUrl, "_blank", "noopener,noreferrer");
+        } catch (error) {
+          setPairingMessage(error instanceof Error ? error.message : "配对失败");
+        } finally { setPairingBusy(false); }
+      };
+
+      const checkPairing = async () => {
+        setPairingMessage("");
+        try {
+          const result = await actions.pairingStatus();
+          setPairing(result);
+          if (!result.ok) setPairingMessage(result.message || "无法检查配对状态");
+          if (result.state === "paired") await refreshStatus();
+        } catch (error) {
+          setPairingMessage(error instanceof Error ? error.message : "无法检查配对状态");
+        }
+      };
+
+      const disconnectPairing = async () => {
+        setPairingBusy(true);
+        setPairingMessage("");
+        try {
+          const result = await actions.disconnectPairing();
+          setPairing(result);
+          if (!result.ok) setPairingMessage(result.message || "断开配对失败");
+          await refreshCredential();
+          await refreshStatus();
+        } catch (error) {
+          setPairingMessage(error instanceof Error ? error.message : "断开配对失败");
+        } finally { setPairingBusy(false); }
+      };
+
+      useEffect(() => {
+        if (pairing?.state !== "pending") return undefined;
+        const timer = window.setInterval(() => { void checkPairing(); }, 3000);
+        return () => window.clearInterval(timer);
+      }, [pairing?.state]);
+
       const test = async () => {
         setTesting(true);
         setTestResult(undefined);
@@ -391,55 +467,55 @@ window.__ModuleLoader__.load({
             })),
           ),
           h("div", { style: gridStyle },
-            h("strong", null, t("token")),
+            h("strong", null, t("pairing")),
+            h("p", { style: mutedStyle }, t("pairHint")),
             h("div", { style: rowStyle },
-              h(StateDot, { state: credential?.configured ? "done" : "warning" }),
-              h("span", null, credential?.configured ? t("configured") : t("unconfigured")),
+              h(StateDot, { state: stateDot(pairing?.state || status?.pairing || "unpaired") }),
+              h("span", null,
+                (pairing?.state || status?.pairing) === "paired" ? t("pairPaired")
+                  : (pairing?.state || status?.pairing) === "pending" ? t("pairPending")
+                    : (pairing?.state || status?.pairing) === "unpaired" ? t("pairUnpaired") : t("pairUnknown")),
             ),
+            (pairing?.pairingCode || status?.pairingCode)
+              ? h("div", { style: gridStyle },
+                  h("span", null, t("pairCode")),
+                  h("code", { style: { fontSize: 18, userSelect: "all" } }, pairing?.pairingCode || status?.pairingCode),
+                ) : null,
             h("div", { style: rowStyle },
-              h(Input, {
-                type: "password",
-                value: tokenInput,
-                onChange: (event) => setTokenInput(event.target.value),
-                placeholder: t("setToken"),
-                autoComplete: "new-password",
-                style: { minWidth: 320 },
-              }),
-              h(Button, {
-                variant: "outline",
-                disabled: !credential?.writable || !tokenInput,
-                onClick: () => void storeToken(tokenInput),
-              }, t("saveToken")),
-              h(Button, { variant: "outline", onClick: () => void generate() }, t("generateToken")),
+              (pairing?.state || status?.pairing) === "paired"
+                ? h(Button, { variant: "outline", disabled: pairingBusy, onClick: () => void disconnectPairing() }, t("pairDisconnect"))
+                : h(Button, { variant: "primary", disabled: pairingBusy || !canWrite || !endpointValid, onClick: () => void connectPairing() }, pairingBusy ? t("pairConnecting") : t("pairConnect")),
+              (pairing?.state || status?.pairing) === "pending"
+                ? h(Button, { variant: "outline", onClick: () => void checkPairing() }, t("pairCheck")) : null,
+              (pairing?.approvalUrl || status?.approvalUrl)
+                ? h(Button, { variant: "outline", onClick: () => window.open(pairing?.approvalUrl || status?.approvalUrl, "_blank", "noopener,noreferrer") }, t("pairOpen")) : null,
             ),
-            generatedToken ? h("div", {
-              style: {
-                ...gridStyle,
-                padding: 12,
-                borderRadius: 8,
-                background: "var(--dsw-color-bg-secondary, rgba(127,127,127,.08))",
-              },
-            },
-              h("strong", null, t("generatedToken")),
-              h("code", { style: { overflowWrap: "anywhere", userSelect: "all" } }, generatedToken),
-              h("p", { style: mutedStyle }, t("tokenSiteHint")),
+            pairingMessage ? h("p", { role: "status", style: mutedStyle }, pairingMessage) : null,
+          ),
+          h("details", null,
+            h("summary", { style: { cursor: "pointer" } }, t("legacyToken")),
+            h("div", { style: { ...gridStyle, marginTop: 12 } },
               h("div", { style: rowStyle },
-                h(Button, {
-                  variant: "outline",
-                  onClick: async () => {
-                    await navigator.clipboard.writeText(generatedToken);
-                    setTokenMessage(t("copied"));
-                  },
-                }, t("copy")),
-                h(Button, {
-                  variant: "primary",
-                  disabled: !credential?.writable,
-                  onClick: () => void storeToken(generatedToken),
-                }, t("saveToken")),
+                h(StateDot, { state: credential?.configured ? "done" : "warning" }),
+                h("span", null, credential?.configured ? t("configured") : t("unconfigured")),
               ),
-            ) : null,
-            h("p", { style: mutedStyle }, t("tokenHint")),
-            tokenMessage ? h("p", { role: "status", style: mutedStyle }, tokenMessage) : null,
+              h("div", { style: rowStyle },
+                h(Input, {
+                  type: "password", value: tokenInput,
+                  onChange: (event) => setTokenInput(event.target.value),
+                  placeholder: t("setToken"), autoComplete: "new-password",
+                  style: { minWidth: 320 },
+                }),
+                h(Button, { variant: "outline", disabled: !credential?.writable || !tokenInput, onClick: () => void storeToken(tokenInput) }, t("saveToken")),
+                h(Button, { variant: "outline", onClick: () => void generate() }, t("generateToken")),
+              ),
+              generatedToken ? h("div", { style: gridStyle },
+                h("code", { style: { overflowWrap: "anywhere", userSelect: "all" } }, generatedToken),
+                h("p", { style: mutedStyle }, t("tokenSiteHint")),
+              ) : null,
+              h("p", { style: mutedStyle }, t("tokenHint")),
+              tokenMessage ? h("p", { role: "status", style: mutedStyle }, tokenMessage) : null,
+            ),
           ),
         ),
 
@@ -451,6 +527,11 @@ window.__ModuleLoader__.load({
             label: t("credential"),
             value: credential?.configured ? "configured" : "unconfigured",
             display: credential?.configured ? t("configured") : t("unconfigured"),
+          }),
+          h(StatusLine, {
+            label: t("pairing"),
+            value: status?.pairing || "unpaired",
+            display: status?.pairing === "paired" ? t("pairPaired") : status?.pairing === "pending" ? t("pairPending") : status?.pairing === "unpaired" ? t("pairUnpaired") : t("pairUnknown"),
           }),
           h(StatusLine, {
             label: t("cloudStatus"),
@@ -578,6 +659,21 @@ window.__ModuleLoader__.load({
         async test() {
           const response = await ctx.remote.deepseekWorkerConnector.test();
           if (!response.ok) throw new Error(hostRemoteFailure(response.error, "test"));
+          return response.value;
+        },
+        async beginPairing() {
+          const response = await ctx.remote.deepseekWorkerConnector.beginPairing();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "beginPairing"));
+          return response.value;
+        },
+        async pairingStatus() {
+          const response = await ctx.remote.deepseekWorkerConnector.pairingStatus();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "pairingStatus"));
+          return response.value;
+        },
+        async disconnectPairing() {
+          const response = await ctx.remote.deepseekWorkerConnector.disconnectPairing();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "disconnectPairing"));
           return response.value;
         },
         async generateToken() {

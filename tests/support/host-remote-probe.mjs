@@ -75,7 +75,7 @@ try {
   assert.equal(service.typertRemote.serviceKey, "deepseekWorkerConnectorControl");
   assert.equal(service.typertRemote.namespace, "deepseekWorkerConnector");
 
-  for (const method of ["status", "generateToken", "test"]) {
+  for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing"]) {
     const found = gatewayDiscover(ctx, "deepseekWorkerConnector", method);
     assert.equal(found.serviceKey, "deepseekWorkerConnectorControl");
     assert.equal(found.receiver, service);
