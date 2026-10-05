@@ -64,11 +64,11 @@ test("normalizes and deduplicates authorized Workspace IDs", () => {
   assert.deepEqual(config.authorizedWorkspaceIds, ["workspace-a", "workspace-b"]);
 });
 
-test("builds the prompt from durable context and task text", () => {
-  assert.equal(
-    buildTaskPrompt({ context: "Prior result", prompt: "Continue" }),
-    "Saved task context:\nPrior result\n\nTask:\nContinue",
-  );
+test("builds an execution-first prompt from durable context and task text", () => {
+  const prompt = buildTaskPrompt({ context: "Prior result", prompt: "Continue" });
+  assert.match(prompt, /local execution worker controlled by ChatGPT/);
+  assert.match(prompt, /Saved task context:\nPrior result/);
+  assert.match(prompt, /Task:\nContinue/);
 });
 
 test("extracts assistant text from a completed Session event", () => {

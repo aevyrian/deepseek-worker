@@ -126,7 +126,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
     assert.equal(init.headers.authorization, undefined);
     assert.match(body.token_hash, /^[0-9a-f]{64}$/);
-    assert.equal(body.client_version, "0.3.3-preview.5");
+    assert.equal(body.client_version, "0.3.3-preview.6");
     assert.deepEqual(body.workspace_allowlist, ["workspace-a"]);
     return new Response(JSON.stringify({
       state: "pending",
@@ -198,7 +198,7 @@ try {
 
   const status = await gatewayInvoke(ctx, "deepseekWorkerConnector", "status");
   assert.equal(status.execution, "native");
-  assert.equal(status.currentVersion, "0.3.3-preview.5");
+  assert.equal(status.currentVersion, "0.3.3-preview.6");
   assert.equal(status.updateState, "idle");
 
   const generated = await gatewayInvoke(ctx, "deepseekWorkerConnector", "generateToken");
@@ -277,7 +277,7 @@ try {
   ctx.registerService("sessionController", {
     async create(request) {
       createCalls += 1;
-      assert.deepEqual(request, { workspaceId: "workspace-a", agentPreset: "orchestrator-worker" });
+      assert.deepEqual(request, { workspaceId: "workspace-a", agentPreset: "standard" });
       return { sessionId: "session-e2e" };
     },
     async resolveAgent(sessionId) {
@@ -286,7 +286,10 @@ try {
     },
     async prompt(request) {
       assert.equal(request.sessionId, "session-e2e");
-      assert.deepEqual(request.content, [{ type: "text", text: "Task:\nRead OS" }]);
+      assert.equal(request.content.length, 1);
+      assert.equal(request.content[0].type, "text");
+      assert.match(request.content[0].text, /local execution worker controlled by ChatGPT/);
+      assert.match(request.content[0].text, /Task:\nRead OS/);
       const assistant = {
         type: "assistant/message", seq: 1,
         data: { message: { content: [{ type: "text", text: "Windows" }] } },
