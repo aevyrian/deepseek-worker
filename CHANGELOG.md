@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3-preview.6
+
+- 修复 Connector 组合包无法直接卸载的问题：不再把常驻 `@deepseek-ai/dsh-agent-preset` 作为 Connector bundle 的第二个运行组件。
+- 新 Native Worker Session 改用 Harness 内置 `standard` preset；“ChatGPT 总控 / DeepSeek 本机执行”的执行契约改为由 Connector 注入每个任务 Prompt，因此核心指挥能力不再依赖常驻自定义 Preset。
+- 关闭 Connector 后不再留下仍运行的 `preset-orchestrator-worker` 阻止卸载。
+- 保留同 Session continue、Workspace 校验、Native Session、Result Upload 与连接恢复逻辑。
+- 增加回归测试：bundle 中不得重新引入常驻 orchestrator preset，任务 Prompt 必须携带执行优先契约。
+
 ## 0.3.3-preview.5
 
 - 更新通道在中文界面改为“正式版 / 测试版”，不再直接向普通用户显示 stable / preview。
