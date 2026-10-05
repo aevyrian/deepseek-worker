@@ -41,7 +41,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-typert-protocol": "*"
+    "@deepseek-ai/dsh-typert-protocol": "*",
+    "@deepseek-ai/dsh-app-boot": "*"
   },
   "dsh": {
     "bundle": {
