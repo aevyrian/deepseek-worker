@@ -153,3 +153,18 @@ Host probe 不是 mock 一个已经存在的 Client namespace；它加载真实 
 Credentials mock 使用官方 `{ value, source }` shape。
 
 Browser tests 覆盖 3 秒 polling、reopen、setup URL、Token 不进 URL/持久存储、普通 UI 与高级兼容入口。
+
+
+## 12. 0.3.1 Self Update
+
+自更新与 Worker/Pairing 解耦。UpdateProvider 只产生经过验证的 version/channel/source/ref metadata，不产生或执行命令。
+
+Host 使用当前 Profile 的 ctx.pluginManager。现有 bundle source 必须由 listBundles() 证明属于受信任 GitHub 仓库。更新 spec 由 Connector 从固定 source + 已验证 exact ref 构造，不直接执行远端任意字符串。
+
+正式 tag 会先解析为 commit SHA；随后读取该 commit 的 package.json 核验 package identity/version/bundle metadata。只有这些检查通过，才允许调用 installBundle()。
+
+Worker runtime 用 workerBusy 覆盖 claim 到 result/failure/lease cleanup 的完整区间。更新状态进入 waiting-idle 后 runWorker 不再开始新 claim；已有任务不被中止。
+
+Plugin Manager 对已安装 package replacement 返回 restart-required，所以新的 package 文件落盘后，当前旧 generation 继续运行到 Harness 重启。没有使用动态 import 新 bundle、强制 kill 或私有 Electron relaunch。
+
+UpdateProvider 预留固定 Cloud endpoint /api/connector/latest；本版本不实现 Cloud 端，只在 endpoint 不可用时 fallback GitHub。
