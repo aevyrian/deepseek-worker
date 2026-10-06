@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.x — Cloud Orchestrator (development)
+## 0.6.0 — Dual-mode Cloud Orchestrator
 
 - 新增双模式项目总控：`auto / native / cloud`。默认 `auto` 优先使用 ChatGPT MCP Events；没有有效订阅、回调不健康或 native grace 过期后仍有 pending event 时，由 Cloud Orchestrator 接管。
 - 新增 OpenAI Responses API 根总控核心，使用 Site 内部 function tools 调用 `read_result / submit_task / continue_task / retry_task`，不转发用户 OAuth Token，也不轮询 DeepSeek 任务状态。
@@ -8,7 +8,7 @@
 - Cloud run ID 与每个调度动作 request_key 均可确定性重建；OpenAI 请求中途失败后保留 pending event，并可用同一幂等键恢复，避免重复创建任务。
 - 新增 durable user-decision 状态、Cloud run 审计、native subscription health 和项目级模式配置 D1 schema。
 - 新增双模式策略、Responses tool loop、native/cloud 竞争、失败恢复、用户决策等回归测试。
-- Connector 本体仍保持 0.5.0；这是 Cloud 0.5.x 架构演进，不要求用户重复安装本机 Connector。
+- Connector / 项目版本推进到 0.6.0，让现有 0.5.0 用户能通过正式更新通道看到并安装这一轮架构更新；本机 Worker Pool 行为保持兼容。
 
 ## 0.5.0
 
