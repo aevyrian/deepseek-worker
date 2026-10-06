@@ -1,101 +1,95 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { InMemoryEventCore } from "../cloud/event-core.mjs";
 import {
   getOrchestrationDiagnostics,
   getProjectOrchestrationMode,
   setProjectOrchestrationMode,
 } from "../cloud/orchestration-admin.mjs";
 
-const OWNER = "owner-1";
 const PROJECT = "project-1";
+const OWNER = "owner-1";
 
-function createStore() {
-  const core = new InMemoryEventCore();
-  core.createProject({ projectId: PROJECT, owner: OWNER });
-  core.configs = new Map();
-  core.getOrchestrationConfig = async (projectId) => core.configs.get(projectId) ?? null;
-  core.setOrchestrationConfig = async (projectId, _owner, config) => {
-    core.configs.set(projectId, structuredClone(config));
+function makeStore() {
+  let config = null;
+  return {
+    async getProject(projectId, owner) {
+      return projectId === PROJECT && owner === OWNER ? { project_id: PROJECT } : null;
+    },
+    async getOrchestrationConfig() { return config; },
+    async setOrchestrationConfig(_project, _owner, value) { config = value; },
+    async listPendingEvents() {
+      return [{ event_id: "evt-1" }];
+    },
+    async getLatestBridgeDelivery() {
+      return {
+        delivery_id: "bridge-del-1",
+        event_id: "evt-1",
+        task_id: "task-1",
+        state: "sent",
+        attempts: 1,
+        fallback_reason: "no_active_subscription",
+        last_error: null,
+        created_at: "2026-10-06T12:00:00Z",
+        sent_at: "2026-10-06T12:00:01Z",
+      };
+    },
   };
-  core.getLatestOrchestratorRun = async () => ({
-    run_id: "run-1",
-    status: "completed",
-    selected_path: "cloud",
-    fallback_reason: "no_active_subscription",
-    model: "model-test",
-    response_id: "resp-1",
-    input_event_ids: ["evt-1"],
-    created_task_ids: ["task-2"],
-    error_summary: null,
-    started_at: "2026-10-06T12:00:00Z",
-    finished_at: "2026-10-06T12:00:02Z",
-  });
-  return core;
 }
 
-test("old projects default to auto mode with a 30 second native grace", async () => {
-  const store = createStore();
+test("old or unset projects default to free auto mode", async () => {
   const result = await getProjectOrchestrationMode({
-    store,
+    store: makeStore(),
     projectId: PROJECT,
     owner: OWNER,
   });
   assert.deepEqual(result, {
     project_id: PROJECT,
     mode: "auto",
-    native_grace_ms: 30_000,
+    native_grace_ms: 30000,
   });
 });
 
-test("project orchestration mode can switch among native/cloud/auto", async () => {
-  const store = createStore();
-  const cloud = await setProjectOrchestrationMode({
+test("project mode accepts native/bridge/auto and rejects retired cloud mode", async () => {
+  const store = makeStore();
+  const bridge = await setProjectOrchestrationMode({
     store,
     projectId: PROJECT,
     owner: OWNER,
-    mode: "cloud",
-    nativeGraceMs: 45_000,
-    now: new Date("2026-10-06T12:00:00Z"),
+    mode: "bridge",
   });
-  assert.equal(cloud.mode, "cloud");
-  assert.equal(cloud.native_grace_ms, 45_000);
+  assert.equal(bridge.mode, "bridge");
 
-  const read = await getProjectOrchestrationMode({
-    store,
-    projectId: PROJECT,
-    owner: OWNER,
-  });
-  assert.equal(read.mode, "cloud");
+  const read = await getProjectOrchestrationMode({ store, projectId: PROJECT, owner: OWNER });
+  assert.equal(read.mode, "bridge");
 
-  const auto = await setProjectOrchestrationMode({
-    store,
-    projectId: PROJECT,
-    owner: OWNER,
-    mode: "auto",
-    nativeGraceMs: 30_000,
-  });
-  assert.equal(auto.mode, "auto");
+  await assert.rejects(
+    () => setProjectOrchestrationMode({ store, projectId: PROJECT, owner: OWNER, mode: "cloud" }),
+    /auto.*native.*bridge/u,
+  );
 });
 
-test("diagnostics expose mode, native health, pending count, and sanitized latest run", async () => {
-  const store = createStore();
+test("diagnostics report free channels and explicitly disable paid cloud orchestrator", async () => {
   const result = await getOrchestrationDiagnostics({
-    store,
+    store: makeStore(),
     projectId: PROJECT,
     owner: OWNER,
-    nativeHealth: {
-      activeSubscriptionCount: 0,
+    nativeHealth: { activeSubscriptionCount: 0 },
+    bridge: {
+      ready: true,
+      worker_online: true,
+      bound: true,
+      state: "sent",
+      last_event_id: "evt-1",
+      last_sent_at: "2026-10-06T12:00:01Z",
     },
   });
 
   assert.equal(result.mode, "auto");
-  assert.equal(result.pending_event_count, 0);
+  assert.equal(result.pending_event_count, 1);
   assert.equal(result.native_subscription.healthy, false);
-  assert.equal(result.native_subscription.reason, "no_active_subscription");
-  assert.equal(result.latest_cloud_run.run_id, "run-1");
-  assert.deepEqual(result.latest_cloud_run.created_task_ids, ["task-2"]);
-  assert.ok(!Object.hasOwn(result.latest_cloud_run, "api_key"));
-  assert.ok(!Object.hasOwn(result.latest_cloud_run, "callback_url"));
+  assert.equal(result.chat_bridge.ready, true);
+  assert.equal(result.latest_bridge_delivery.state, "sent");
+  assert.equal(result.paid_cloud_orchestrator_enabled, false);
+  assert.ok(!Object.hasOwn(result, "latest_cloud_run"));
 });
