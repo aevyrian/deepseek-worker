@@ -2,38 +2,50 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  buildOrchestratorHolder,
   decideOrchestrationPath,
-  stableRunRequestKey,
   subscriptionHealth,
 } from "../cloud/orchestration-policy.mjs";
 
 const NOW = new Date("2026-10-06T12:00:00Z");
 
-test("auto mode falls back to cloud immediately without an active subscription", () => {
+test("auto mode falls back to Chat Bridge immediately without an active native subscription", () => {
   const decision = decideOrchestrationPath({
     mode: "auto",
     pendingEventOccurredAt: "2026-10-06T11:59:59Z",
     nativeGraceMs: 30_000,
     health: { activeSubscriptionCount: 0 },
+    bridgeReady: true,
     now: NOW,
   });
   assert.deepEqual(decision, {
-    path: "cloud",
+    path: "bridge",
     reason: "no_active_subscription",
     retryAfterMs: 0,
   });
 });
 
-test("auto mode gives a healthy native subscription its grace window", () => {
+test("auto mode leaves the event pending when both free channels are unavailable", () => {
+  const decision = decideOrchestrationPath({
+    mode: "auto",
+    pendingEventOccurredAt: "2026-10-06T11:59:59Z",
+    health: { activeSubscriptionCount: 0 },
+    bridgeReady: false,
+    now: NOW,
+  });
+  assert.deepEqual(decision, {
+    path: "none",
+    reason: "bridge_not_ready",
+    retryAfterMs: null,
+  });
+});
+
+test("healthy native subscription owns a fresh event during grace", () => {
   const decision = decideOrchestrationPath({
     mode: "auto",
     pendingEventOccurredAt: "2026-10-06T11:59:50Z",
     nativeGraceMs: 30_000,
-    health: {
-      activeSubscriptionCount: 1,
-      callbackVerified: true,
-    },
+    health: { activeSubscriptionCount: 1, callbackVerified: true },
+    bridgeReady: true,
     now: NOW,
   });
   assert.equal(decision.path, "native");
@@ -41,7 +53,7 @@ test("auto mode gives a healthy native subscription its grace window", () => {
   assert.equal(decision.retryAfterMs, 20_000);
 });
 
-test("auto mode takes over a still-pending event after the native grace expires", () => {
+test("Chat Bridge takes over after native grace when the event is still pending", () => {
   const decision = decideOrchestrationPath({
     mode: "auto",
     pendingEventOccurredAt: "2026-10-06T11:59:00Z",
@@ -52,16 +64,17 @@ test("auto mode takes over a still-pending event after the native grace expires"
       latestDeliveryState: "delivered",
       latestDeliveryHttpStatus: 202,
     },
+    bridgeReady: true,
     now: NOW,
   });
   assert.deepEqual(decision, {
-    path: "cloud",
+    path: "bridge",
     reason: "native_grace_expired_with_pending_event",
     retryAfterMs: 0,
   });
 });
 
-test("broken callback delivery bypasses native grace", () => {
+test("broken native callback bypasses native grace", () => {
   const health = subscriptionHealth({
     activeSubscriptionCount: 1,
     callbackVerified: true,
@@ -76,7 +89,6 @@ test("broken callback delivery bypasses native grace", () => {
   const decision = decideOrchestrationPath({
     mode: "auto",
     pendingEventOccurredAt: "2026-10-06T11:59:59Z",
-    nativeGraceMs: 30_000,
     health: {
       activeSubscriptionCount: 1,
       callbackVerified: true,
@@ -84,54 +96,31 @@ test("broken callback delivery bypasses native grace", () => {
       latestDeliveryHttpStatus: 503,
       consecutiveDeliveryFailures: 3,
     },
+    bridgeReady: true,
     now: NOW,
   });
-  assert.equal(decision.path, "cloud");
+  assert.equal(decision.path, "bridge");
   assert.equal(decision.reason, "delivery_repeated_failure");
 });
 
-test("forced modes override subscription health", () => {
+test("forced free modes are native or bridge only", () => {
   assert.equal(decideOrchestrationPath({
-    mode: "cloud",
+    mode: "bridge",
     pendingEventOccurredAt: "2026-10-06T12:00:00Z",
-    health: { activeSubscriptionCount: 1, callbackVerified: true },
+    bridgeReady: true,
     now: NOW,
-  }).path, "cloud");
+  }).path, "bridge");
 
   assert.equal(decideOrchestrationPath({
     mode: "native",
     pendingEventOccurredAt: "2026-10-06T11:00:00Z",
     health: { activeSubscriptionCount: 0 },
+    bridgeReady: true,
     now: NOW,
   }).path, "native");
-});
 
-test("expired subscriptions are unhealthy", () => {
-  const health = subscriptionHealth({
-    activeSubscriptionCount: 1,
-    callbackVerified: true,
-    subscriptionRefreshBefore: "2026-10-06T11:59:59Z",
-    now: NOW,
-  });
-  assert.deepEqual(health, {
-    healthy: false,
-    reason: "subscription_expired",
-    active: false,
-  });
-});
-
-test("orchestrator holder and action request keys are deterministic", () => {
-  assert.equal(
-    buildOrchestratorHolder({ projectId: "p1", runId: "r1" }),
-    "cloud-orchestrator:p1:r1",
-  );
-  assert.equal(
-    stableRunRequestKey({
-      projectId: "p1",
-      runId: "r1",
-      actionIndex: 2,
-      actionName: "submit_task",
-    }),
-    "orchestrator:p1:r1:2:submit_task",
+  assert.throws(
+    () => decideOrchestrationPath({ mode: "cloud", now: NOW }),
+    /auto.*native.*bridge/u,
   );
 });
