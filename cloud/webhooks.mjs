@@ -106,40 +106,6 @@ export async function sendSignedWebhook({
   }
 }
 
-export async function verifyCallbackEndpoint({
-  subscription,
-  webhookFetch,
-  challenge,
-  verificationId = `msg_verification_${randomUUID()}`,
-  now = new Date(),
-  timeoutMs = 10_000,
-}) {
-  if (typeof challenge !== "string" || challenge.length < 16 || challenge.length > 512) {
-    throw new Error("verification challenge must be a 16-512 character string");
-  }
-  const body = JSON.stringify({ type: "verification", challenge });
-  const response = await sendSignedWebhook({
-    subscription,
-    payload: { id: verificationId },
-    webhookFetch: async (url, init) => webhookFetch(url, { ...init, body }),
-    now,
-    timeoutMs,
-  });
-
-  if (!response.accepted) {
-    const error = new Error(`Callback verification returned HTTP ${response.status}`);
-    error.code = "CallbackEndpointError";
-    error.reason = "http_error";
-    throw error;
-  }
-
-  // The caller must provide a webhookFetch implementation that preserves the
-  // Response body. Re-issue is not allowed; verification is single-use.
-  // sendSignedWebhook returns only status, so direct verification uses the
-  // lower-level helper below.
-  return { verified: true, verificationId };
-}
-
 export async function verifyCallbackChallenge({
   subscription,
   webhookFetch,
