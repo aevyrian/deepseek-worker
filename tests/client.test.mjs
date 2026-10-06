@@ -60,6 +60,8 @@ function goodRemoteNamespace() {
         },
       };
     },
+    async openBridgeBrowser() { return { ok: true, value: { ok: true, bound: true, state: "idle" } }; },
+    async testBridge() { return { ok: true, value: { ok: true, bound: true, state: "idle" } }; },
   };
 }
 
@@ -113,7 +115,7 @@ async function mountClient({
         assert.equal(contribution.package, "deepseek-worker-connector");
         assert.deepEqual(
           Array.from(contribution.descriptors, (descriptor) => descriptor.method),
-          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"],
+          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "openBridgeBrowser", "testBridge"],
         );
         mounted = true;
         return async () => { remoteDisposed = true; mounted = false; };
@@ -159,6 +161,8 @@ test("Client mounts all Connector Remotes and keeps manual Token compatibility",
   assert.equal((await mounted.actions.pairingStatus()).state, "pending");
   assert.equal((await mounted.actions.disconnectPairing()).state, "unpaired");
   assert.equal((await mounted.actions.checkForUpdates()).updateState, "up-to-date");
+  assert.equal((await mounted.actions.openBridgeBrowser()).ok, true);
+  assert.equal((await mounted.actions.testBridge()).ok, true);
   assert.equal((await mounted.actions.describeCredential()).configured, true);
   assert.equal(await mounted.actions.storeCredential("manual-compatibility-token"), true);
   assert.equal(mounted.actions.getWorkspacesSnapshot().items[0].workspaceId, "workspace-a");
