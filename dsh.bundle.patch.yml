@@ -13,5 +13,8 @@
         enableHeadlessFallback: true
         autoUpdate: true
         updateChannel: stable
+        chatBridgeEnabled: true
+        chatBridgeChatUrl: ""
+        chatBridgeDebugPort: 9223
         headlessCommand: dsh
         headlessArgs: [--profile, headless, --json]
