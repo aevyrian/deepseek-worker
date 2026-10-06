@@ -358,19 +358,25 @@ export async function runCloudOrchestrator({
       }
     }
 
-    response = await callResponsesApi({
-      fetchImpl,
-      apiKey: resolved.apiKey,
-      timeoutMs: resolved.timeoutMs,
-      payload: {
-        model: resolved.model,
-        instructions,
-        previous_response_id: response.id,
-        input: outputs,
-        tools: TOOL_DEFINITIONS,
-        parallel_tool_calls: true,
-      },
-    });
+    try {
+      response = await callResponsesApi({
+        fetchImpl,
+        apiKey: resolved.apiKey,
+        timeoutMs: resolved.timeoutMs,
+        payload: {
+          model: resolved.model,
+          instructions,
+          previous_response_id: response.id,
+          input: outputs,
+          tools: TOOL_DEFINITIONS,
+          parallel_tool_calls: true,
+        },
+      });
+    } catch (error) {
+      error.created_task_ids = [...createdTaskIds];
+      error.tool_audit = [...toolAudit];
+      throw error;
+    }
   }
 
   const error = new Error("Cloud orchestrator exceeded ORCHESTRATOR_MAX_ROUNDS");
