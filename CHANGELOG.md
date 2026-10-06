@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 — Free Dual Channel
+
+- 第一原则改为免费可用：正式总控只保留 `native / bridge / auto`，移除 0.6.0 的 OpenAI Responses API 付费 fallback。
+- 新增本机 Chat Bridge：Connector 使用独立持久浏览器 Profile，把固定、极小的 `[DSW]` 事件控制消息发送回绑定的 ChatGPT 对话；真实结果仍由 ChatGPT 通过 DeepSeek Worker MCP 读取。
+- Native MCP Events 仍为优先通道；无订阅、订阅异常或 native grace 超时后，`auto` 转到 Chat Bridge。
+- Worker terminal result/failure、register、heartbeat 支持结构化 bridge delivery；Connector 用确定性 `message_key` 去重，并通过 `/api/worker/bridge/ack` 回报投递状态。
+- Chat Bridge 不接收 Cloud 任意 prompt，不发送任务结果、日志、凭据、Cookie 或本地路径；Cloud 只下发 project/event/task/revision 等标识。
+- 新增本地 Chat Bridge 设置 UI、浏览器登录/测试入口、free dual-channel D1 schema、diagnostics 与回归测试。
+- Connector / updater / UI 版本推进到 0.7.0；现有 0.6.0 可通过正式更新通道升级。
+
 ## 0.6.0 — Dual-mode Cloud Orchestrator
 
 - 新增双模式项目总控：`auto / native / cloud`。默认 `auto` 优先使用 ChatGPT MCP Events；没有有效订阅、回调不健康或 native grace 过期后仍有 pending event 时，由 Cloud Orchestrator 接管。
