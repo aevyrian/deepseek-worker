@@ -57,11 +57,28 @@ export async function setProjectOrchestrationMode({
   return normalized;
 }
 
+function sanitizeBridgeDelivery(row) {
+  if (!row) return null;
+  return {
+    delivery_id: row.delivery_id ?? null,
+    event_id: row.event_id ?? null,
+    task_id: row.task_id ?? null,
+    state: row.state ?? null,
+    attempts: Number.isInteger(row.attempts) ? row.attempts : 0,
+    fallback_reason: row.fallback_reason ?? null,
+    last_error: row.last_error ? String(row.last_error).slice(0, 500) : null,
+    created_at: row.created_at ?? null,
+    sent_at: row.sent_at ?? null,
+    acknowledged_at: row.acknowledged_at ?? null,
+  };
+}
+
 export async function getOrchestrationDiagnostics({
   store,
   projectId,
   owner,
   nativeHealth = {},
+  bridge = {},
 }) {
   const config = await getProjectOrchestrationMode({
     store,
@@ -72,28 +89,24 @@ export async function getOrchestrationDiagnostics({
     projectId,
     owner,
   });
-  const latestRun = typeof store.getLatestOrchestratorRun === "function"
-    ? await store.getLatestOrchestratorRun(projectId, owner)
+  const latestBridge = typeof store.getLatestBridgeDelivery === "function"
+    ? await store.getLatestBridgeDelivery(projectId, owner)
     : null;
 
   return {
     ...config,
     pending_event_count: pendingEvents.length,
     native_subscription: subscriptionHealth(nativeHealth),
-    latest_cloud_run: latestRun
-      ? {
-          run_id: latestRun.run_id,
-          status: latestRun.status,
-          selected_path: latestRun.selected_path,
-          fallback_reason: latestRun.fallback_reason ?? null,
-          model: latestRun.model ?? null,
-          response_id: latestRun.response_id ?? null,
-          input_event_ids: latestRun.input_event_ids ?? [],
-          created_task_ids: latestRun.created_task_ids ?? [],
-          error_summary: latestRun.error_summary ?? null,
-          started_at: latestRun.started_at ?? null,
-          finished_at: latestRun.finished_at ?? null,
-        }
-      : null,
+    chat_bridge: {
+      ready: bridge.ready === true,
+      worker_online: bridge.worker_online === true,
+      bound: bridge.bound === true,
+      state: bridge.state ?? null,
+      last_event_id: bridge.last_event_id ?? null,
+      last_sent_at: bridge.last_sent_at ?? null,
+      last_error: bridge.last_error ? String(bridge.last_error).slice(0, 500) : null,
+    },
+    latest_bridge_delivery: sanitizeBridgeDelivery(latestBridge),
+    paid_cloud_orchestrator_enabled: false,
   };
 }

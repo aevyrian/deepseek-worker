@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
 
     const contribution = {
       package: "deepseek-worker-connector",
-      descriptors: ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"].map((method) => ({
+      descriptors: ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "openBridgeBrowser", "testBridge"].map((method) => ({
         id: `deepseek-worker-connector#deepseekWorkerConnector/${method}`,
         service: "deepseekWorkerConnectorControl",
         namespace: "deepseekWorkerConnector",
@@ -60,6 +60,17 @@ window.__ModuleLoader__.load({
       trustedMode: "受信任工作区模式",
       trustedHint: "已授权 Workspace 内不额外收紧 Harness 权限；实际能力仍由 Harness Profile、工具审批和操作系统决定。",
       restrictedHint: "关闭后暂停远程任务领取。",
+      chatBridge: "免费 Chat Bridge",
+      chatBridgeHint: "备用免费通道：任务完成后把一条很短的 [DSW] 控制消息发回你绑定的 ChatGPT 对话；真实结果仍由 ChatGPT 通过 MCP 读取。",
+      chatBridgeEnabled: "启用 Chat Bridge",
+      chatBridgeChatUrl: "绑定的 ChatGPT 对话 URL",
+      chatBridgeUrlHint: "复制你希望作为总控的 ChatGPT 对话地址（chatgpt.com）。只保存在本机 Connector 配置中。",
+      chatBridgeOpen: "打开桥接浏览器 / 登录 ChatGPT",
+      chatBridgeTest: "测试桥接浏览器",
+      chatBridgeBound: "已绑定",
+      chatBridgeUnbound: "未绑定",
+      chatBridgeReady: "可用",
+      chatBridgeNeedsLogin: "需要登录",
       advanced: "高级 / 诊断",
       endpoint: "Cloud Endpoint",
       workerId: "Worker ID",
@@ -143,6 +154,17 @@ window.__ModuleLoader__.load({
       trustedMode: "Trusted Workspace mode",
       trustedHint: "Inside selected Workspaces the Connector adds no second permission layer; Harness and OS permissions still apply.",
       restrictedHint: "Disables remote task claiming.",
+      chatBridge: "Free Chat Bridge",
+      chatBridgeHint: "Free fallback: injects a tiny [DSW] control message into the bound ChatGPT chat; ChatGPT still reads real results through MCP.",
+      chatBridgeEnabled: "Enable Chat Bridge",
+      chatBridgeChatUrl: "Bound ChatGPT chat URL",
+      chatBridgeUrlHint: "Paste the chatgpt.com conversation URL used as the root orchestrator. Stored only in local Connector config.",
+      chatBridgeOpen: "Open bridge browser / sign in",
+      chatBridgeTest: "Test bridge browser",
+      chatBridgeBound: "Bound",
+      chatBridgeUnbound: "Not bound",
+      chatBridgeReady: "Ready",
+      chatBridgeNeedsLogin: "Sign-in required",
       advanced: "Advanced / Diagnostics",
       token: "Manual Worker Token",
       setToken: "Enter compatibility Token",
@@ -333,6 +355,9 @@ window.__ModuleLoader__.load({
         enableHeadlessFallback: initial.enableHeadlessFallback !== false,
         autoUpdate: initial.autoUpdate !== false,
         updateChannel: initial.updateChannel === "preview" ? "preview" : "stable",
+        chatBridgeEnabled: initial.chatBridgeEnabled !== false,
+        chatBridgeChatUrl: initial.chatBridgeChatUrl || "",
+        chatBridgeDebugPort: String(initial.chatBridgeDebugPort ?? 9223),
       }));
       const [authorizedWorkspaceIds, setAuthorizedWorkspaceIds] = useState(() => (
         Array.isArray(initial.authorizedWorkspaceIds) ? [...new Set(initial.authorizedWorkspaceIds.map(String))] : []
@@ -375,6 +400,9 @@ window.__ModuleLoader__.load({
           enableHeadlessFallback: value.enableHeadlessFallback !== false,
           autoUpdate: value.autoUpdate !== false,
           updateChannel: value.updateChannel === "preview" ? "preview" : "stable",
+          chatBridgeEnabled: value.chatBridgeEnabled !== false,
+          chatBridgeChatUrl: value.chatBridgeChatUrl || "",
+          chatBridgeDebugPort: String(value.chatBridgeDebugPort ?? 9223),
         });
         setAuthorizedWorkspaceIds(Array.isArray(value.authorizedWorkspaceIds)
           ? [...new Set(value.authorizedWorkspaceIds.map(String))] : []);
@@ -458,6 +486,9 @@ window.__ModuleLoader__.load({
           ["enableHeadlessFallback", draft.enableHeadlessFallback],
           ["autoUpdate", draft.autoUpdate],
           ["updateChannel", draft.updateChannel],
+          ["chatBridgeEnabled", draft.chatBridgeEnabled],
+          ["chatBridgeChatUrl", draft.chatBridgeChatUrl.trim()],
+          ["chatBridgeDebugPort", number(draft.chatBridgeDebugPort)],
         ].map(([field, value]) => ({ op: "set", path: [field], value }));
 
         setSaving(true);
@@ -766,10 +797,67 @@ window.__ModuleLoader__.load({
         ),
 
         h("section", { style: sectionStyle },
+          h("h3", { style: { margin: 0 } }, t("chatBridge")),
+          h("p", { style: mutedStyle }, t("chatBridgeHint")),
+          h("div", { style: rowStyle },
+            h(Switch, {
+              checked: draft.chatBridgeEnabled,
+              label: t("chatBridgeEnabled"),
+              onChange: (next) => setDraft((value) => ({ ...value, chatBridgeEnabled: next })),
+            }),
+            h("strong", null, draft.chatBridgeEnabled ? t("enabled") : t("disabled")),
+          ),
+          h(Field, { label: t("chatBridgeChatUrl") }, h(Input, {
+            value: draft.chatBridgeChatUrl,
+            onChange: (event) => setDraft((value) => ({ ...value, chatBridgeChatUrl: event.target.value })),
+            placeholder: "https://chatgpt.com/c/…",
+            spellCheck: false,
+          })),
+          h("p", { style: mutedStyle }, t("chatBridgeUrlHint")),
+          h("div", { style: rowStyle },
+            h(Button, {
+              variant: "primary",
+              onClick: async () => {
+                const saved = await saveConfig();
+                if (!saved) return;
+                const result = await actions.openBridgeBrowser();
+                setStatusMessage(result?.ok ? "" : (result?.message || "Chat Bridge unavailable"));
+                await refreshStatus();
+              },
+            }, t("chatBridgeOpen")),
+            h(Button, {
+              variant: "outline",
+              onClick: async () => {
+                const saved = await saveConfig();
+                if (!saved) return;
+                const result = await actions.testBridge();
+                setStatusMessage(result?.ok ? "" : (result?.message || "Chat Bridge unavailable"));
+                await refreshStatus();
+              },
+            }, t("chatBridgeTest")),
+          ),
+          h("div", { style: gridStyle },
+            h(StatusLine, {
+              label: t("chatBridge"),
+              value: status?.chatBridge?.state || "unknown",
+              display: status?.chatBridge?.bound
+                ? (status?.chatBridge?.state === "needs-login" ? t("chatBridgeNeedsLogin") : t("chatBridgeReady"))
+                : t("chatBridgeUnbound"),
+            }),
+            status?.chatBridge?.lastSentAt
+              ? h("p", { style: mutedStyle }, `Last sent: ${status.chatBridge.lastSentAt}`)
+              : null,
+            status?.chatBridge?.lastError
+              ? h("p", { role: "status", style: mutedStyle }, status.chatBridge.lastError)
+              : null,
+          ),
+        ),
+
+        h("section", { style: sectionStyle },
           h("h3", { style: { margin: 0 } }, t("version")),
           h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
             h("span", null, t("runningVersion")),
-            h("strong", null, status?.currentVersion || "0.6.0"),
+            h("strong", null, status?.currentVersion || "0.7.0"),
           ),
           status?.installedVersion && status.installedVersion !== status.currentVersion
             ? h(React.Fragment, null,
@@ -805,7 +893,7 @@ window.__ModuleLoader__.load({
           ),
           h(StatusLine, { label: t("updateStatus"), value: updateState, display: updateDisplay }),
           status?.restartRequired
-            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.6.0"} · ${t("updateRestart")}`)
+            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.7.0"} · ${t("updateRestart")}`)
             : null,
           updateState === "failed"
             ? h("div", { style: gridStyle },
@@ -885,7 +973,7 @@ window.__ModuleLoader__.load({
             ),
             h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
               h("span", null, t("latestVersion")),
-              h("span", null, status?.latestVersion || status?.currentVersion || "0.6.0"),
+              h("span", null, status?.latestVersion || status?.currentVersion || "0.7.0"),
             ),
             h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
               h("span", null, t("lastChecked")),
@@ -985,6 +1073,16 @@ window.__ModuleLoader__.load({
         async checkForUpdates() {
           const response = await ctx.remote.deepseekWorkerConnector.checkForUpdates();
           if (!response.ok) throw new Error(hostRemoteFailure(response.error, "checkForUpdates"));
+          return response.value;
+        },
+        async openBridgeBrowser() {
+          const response = await ctx.remote.deepseekWorkerConnector.openBridgeBrowser();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "openBridgeBrowser"));
+          return response.value;
+        },
+        async testBridge() {
+          const response = await ctx.remote.deepseekWorkerConnector.testBridge();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "testBridge"));
           return response.value;
         },
         async describeCredential() {
