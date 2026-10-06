@@ -147,4 +147,4 @@ Connector 支持自动更新。
 - [docs/UPDATE.md](docs/UPDATE.md) — 更新机制
 - [docs/CLOUD-PAIRING.md](docs/CLOUD-PAIRING.md) — Cloud 配对协议
 - [docs/CLOUD-EVENTS.md](docs/CLOUD-EVENTS.md) — MCP Events / Project State
-- [docs/DUAL-MODE-ORCHESTRATION.md](docs/DUAL-MODE-ORCHESTRATION.md) — Native Events 优先 + Cloud Orchestrator fallback
+- [docs/FREE-DUAL-CHANNEL.md](docs/FREE-DUAL-CHANNEL.md) — Native MCP Events + 免费 Chat Bridge
