@@ -25,6 +25,7 @@ import {
 } from "./lib/protocol.mjs";
 import { authorizedWorkspaceState, workspaceHeartbeatPayload } from "./lib/workspaces.mjs";
 import { executeNativeSession } from "./lib/native-session.mjs";
+import { AsyncTaskPool, fillTaskPool } from "./lib/task-pool.mjs";
 import { registerOrchestratorPreset } from "./lib/orchestrator-preset.mjs";
 import { migrateLegacyOrchestratorBundles } from "./lib/migration.mjs";
 import { migrateLegacyProfileArtifacts } from "./lib/profile-cleanup.mjs";
@@ -51,6 +52,7 @@ export const Config = Schema.object({
   endpoint: Schema.string().pattern(/^https:\/\//u).default(DEFAULT_ENDPOINT).volatile(),
   workerId: Schema.string().pattern(/\S/u).default(DEFAULT_WORKER_ID).volatile(),
   pollIntervalMs: Schema.number().step(1).min(1000).max(60000).default(4000).volatile(),
+  maxConcurrentTasks: Schema.number().step(1).min(1).max(24).default(24).volatile(),
   heartbeatIntervalMs: Schema.number().step(1).min(5000).max(300000).default(20000).volatile(),
   leaseRenewIntervalMs: Schema.number().step(1).min(5000).max(55000).default(20000).volatile(),
   leaseWaitTimeoutMs: Schema.number().step(1).min(10000).max(86400000).default(1800000).volatile(),
@@ -144,6 +146,8 @@ function initialRuntime() {
     pairingExpiresAt: null,
     ...createUpdateRuntime(CONNECTOR_VERSION),
     workerBusy: false,
+    activeTaskCount: 0,
+    maxConcurrentTasks: 24,
     lastError: null,
   };
 }
@@ -673,7 +677,21 @@ async function runWorker(ctx, input, runtime, signal) {
   let checkedEndpoint;
   let checkedPairingState;
 
-  while (!signal.aborted) {
+  const activeTasks = new AsyncTaskPool({
+    limit: 24,
+    onSizeChange: (size) => {
+      runtime.activeTaskCount = size;
+      runtime.workerBusy = size > 0;
+    },
+    onTaskError: (error, taskId) => {
+      if (!signal.aborted) {
+        ctx.logger.warn("deepseek-worker task %s failed outside lease handler: %s", taskId, redactSecret(error));
+      }
+    },
+  });
+
+  try {
+    while (!signal.aborted) {
     let pollIntervalMs = 4000;
     let token;
     try {
@@ -684,6 +702,8 @@ async function runWorker(ctx, input, runtime, signal) {
       runtime.workerId = config.workerId;
       runtime.workspaceCount = workspaces.count;
       runtime.execution = executionMode(controller !== undefined);
+      runtime.maxConcurrentTasks = config.maxConcurrentTasks;
+      activeTasks.setLimit(config.maxConcurrentTasks);
 
       const credentials = currentCredentials(ctx);
       if (credentials === undefined) {
@@ -801,13 +821,12 @@ async function runWorker(ctx, input, runtime, signal) {
         continue;
       }
 
-      runtime.workerBusy = true;
-      try {
-        const claim = await workerRequest(config, token, "claim", {}, signal);
-        if (claim?.task) await processLease(ctx, config, token, claim.task, signal);
-      } finally {
-        runtime.workerBusy = false;
-      }
+      await fillTaskPool(
+        activeTasks,
+        () => workerRequest(config, token, "claim", {}, signal),
+        (task) => processLease(ctx, config, token, task, signal),
+        signal,
+      );
     } catch (error) {
       if (signal.aborted) break;
       const mapped = classifyConnectionError(error);
@@ -823,7 +842,12 @@ async function runWorker(ctx, input, runtime, signal) {
       runtime.lastError = mapped.message;
       ctx.logger.warn("deepseek-worker connector loop: %s", redactSecret(error, token));
     }
-    await sleep(pollIntervalMs, signal);
+      await sleep(pollIntervalMs, signal);
+    }
+  } finally {
+    await activeTasks.waitForIdle();
+    runtime.activeTaskCount = 0;
+    runtime.workerBusy = false;
   }
 }
 
