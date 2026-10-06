@@ -1075,6 +1075,16 @@ window.__ModuleLoader__.load({
           if (!response.ok) throw new Error(hostRemoteFailure(response.error, "checkForUpdates"));
           return response.value;
         },
+        async openBridgeBrowser() {
+          const response = await ctx.remote.deepseekWorkerConnector.openBridgeBrowser();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "openBridgeBrowser"));
+          return response.value;
+        },
+        async testBridge() {
+          const response = await ctx.remote.deepseekWorkerConnector.testBridge();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "testBridge"));
+          return response.value;
+        },
         async describeCredential() {
           const response = await ctx.remote.credentials.describe([TOKEN_REF]);
           if (!response.ok) throw new Error(credentialFailure(response.error, "describe"));
