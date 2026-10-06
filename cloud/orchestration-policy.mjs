@@ -1,11 +1,4 @@
-const MODES = new Set(["auto", "native", "cloud"]);
-
-function requiredString(value, field) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${field} must be a non-empty string`);
-  }
-  return value.trim();
-}
+const MODES = new Set(["auto", "native", "bridge"]);
 
 function asDateMs(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -16,7 +9,7 @@ function asDateMs(value) {
 export function normalizeOrchestrationMode(mode) {
   const value = mode ?? "auto";
   if (!MODES.has(value)) {
-    throw new Error('orchestration mode must be one of "auto", "native", or "cloud"');
+    throw new Error('orchestration mode must be one of "auto", "native", or "bridge"');
   }
   return value;
 }
@@ -45,59 +38,22 @@ export function subscriptionHealth({
   if (!Number.isInteger(activeSubscriptionCount) || activeSubscriptionCount < 0) {
     throw new Error("activeSubscriptionCount must be a non-negative integer");
   }
-
-  if (activeSubscriptionCount === 0) {
-    return {
-      healthy: false,
-      reason: "no_active_subscription",
-      active: false,
-    };
-  }
-
+  if (activeSubscriptionCount === 0) return { healthy: false, reason: "no_active_subscription", active: false };
   if (refreshBeforeMs !== null && refreshBeforeMs <= nowMs) {
-    return {
-      healthy: false,
-      reason: "subscription_expired",
-      active: false,
-    };
+    return { healthy: false, reason: "subscription_expired", active: false };
   }
-
-  if (!callbackVerified) {
-    return {
-      healthy: false,
-      reason: "callback_unverified",
-      active: true,
-    };
-  }
-
-  if (latestDeliveryState === "dead") {
-    return {
-      healthy: false,
-      reason: "delivery_dead",
-      active: true,
-    };
-  }
-
+  if (!callbackVerified) return { healthy: false, reason: "callback_unverified", active: true };
+  if (latestDeliveryState === "dead") return { healthy: false, reason: "delivery_dead", active: true };
   if (Number.isInteger(consecutiveDeliveryFailures) && consecutiveDeliveryFailures >= 3) {
-    return {
-      healthy: false,
-      reason: "delivery_repeated_failure",
-      active: true,
-    };
+    return { healthy: false, reason: "delivery_repeated_failure", active: true };
   }
-
   if (
     typeof latestDeliveryHttpStatus === "number"
     && latestDeliveryHttpStatus >= 400
     && latestDeliveryState !== "delivered"
   ) {
-    return {
-      healthy: false,
-      reason: "delivery_http_error",
-      active: true,
-    };
+    return { healthy: false, reason: "delivery_http_error", active: true };
   }
-
   return {
     healthy: true,
     reason: latestDeliveryAt ? "healthy_recent_delivery" : "healthy_ready",
@@ -111,6 +67,7 @@ export function decideOrchestrationPath({
   pendingEventAcknowledged = false,
   nativeGraceMs = 30_000,
   health = {},
+  bridgeReady = false,
   now = new Date(),
 } = {}) {
   const normalizedMode = normalizeOrchestrationMode(mode);
@@ -119,92 +76,41 @@ export function decideOrchestrationPath({
   const occurredAtMs = asDateMs(pendingEventOccurredAt);
 
   if (pendingEventAcknowledged) {
-    return {
-      path: "none",
-      reason: "event_already_acknowledged",
-      retryAfterMs: null,
-    };
+    return { path: "none", reason: "event_already_acknowledged", retryAfterMs: null };
   }
 
-  if (normalizedMode === "cloud") {
-    return {
-      path: "cloud",
-      reason: "forced_cloud_mode",
-      retryAfterMs: 0,
-    };
+  if (normalizedMode === "bridge") {
+    return bridgeReady
+      ? { path: "bridge", reason: "forced_bridge_mode", retryAfterMs: 0 }
+      : { path: "none", reason: "bridge_not_ready", retryAfterMs: null };
   }
 
   if (normalizedMode === "native") {
-    return {
-      path: "native",
-      reason: "forced_native_mode",
-      retryAfterMs: null,
-    };
+    return { path: "native", reason: "forced_native_mode", retryAfterMs: null };
   }
 
   const nativeHealth = subscriptionHealth({ ...health, now });
   if (!nativeHealth.healthy) {
-    return {
-      path: "cloud",
-      reason: nativeHealth.reason,
-      retryAfterMs: 0,
-    };
+    return bridgeReady
+      ? { path: "bridge", reason: nativeHealth.reason, retryAfterMs: 0 }
+      : { path: "none", reason: "bridge_not_ready", retryAfterMs: null };
   }
 
   if (occurredAtMs === null) {
-    return {
-      path: "native",
-      reason: "native_healthy_event_age_unknown",
-      retryAfterMs: graceMs,
-    };
+    return { path: "native", reason: "native_healthy_event_age_unknown", retryAfterMs: graceMs };
   }
 
   const ageMs = Math.max(0, nowMs - occurredAtMs);
   if (ageMs < graceMs) {
-    return {
-      path: "native",
-      reason: "native_grace_period",
-      retryAfterMs: graceMs - ageMs,
-    };
+    return { path: "native", reason: "native_grace_period", retryAfterMs: graceMs - ageMs };
   }
 
-  return {
-    path: "cloud",
-    reason: "native_grace_expired_with_pending_event",
-    retryAfterMs: 0,
-  };
+  return bridgeReady
+    ? { path: "bridge", reason: "native_grace_expired_with_pending_event", retryAfterMs: 0 }
+    : { path: "none", reason: "bridge_not_ready_after_native_grace", retryAfterMs: null };
 }
 
-export function buildOrchestratorHolder({
-  projectId,
-  runId,
-  prefix = "cloud-orchestrator",
-}) {
-  const project = requiredString(projectId, "projectId");
-  const run = requiredString(runId, "runId");
-  return `${prefix}:${project}:${run}`;
-}
-
-export function stableRunRequestKey({
-  projectId,
-  runId,
-  actionIndex,
-  actionName,
-}) {
-  const project = requiredString(projectId, "projectId");
-  const run = requiredString(runId, "runId");
-  const name = requiredString(actionName, "actionName");
-  if (!Number.isInteger(actionIndex) || actionIndex < 0) {
-    throw new Error("actionIndex must be a non-negative integer");
-  }
-  return `orchestrator:${project}:${run}:${actionIndex}:${name}`;
-}
-
-export function summarizeOrchestrationDecision({
-  mode,
-  decision,
-  health,
-}) {
+export function summarizeOrchestrationDecision({ mode, decision, health, bridgeReady = false }) {
   return {
     mode: normalizeOrchestrationMode(mode),
     selected_path: decision.path,
@@ -215,5 +121,6 @@ export function summarizeOrchestrationDecision({
       reason: health?.reason ?? null,
       active: Boolean(health?.active),
     },
+    bridge_ready: Boolean(bridgeReady),
   };
 }
