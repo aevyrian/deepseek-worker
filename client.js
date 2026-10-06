@@ -769,7 +769,7 @@ window.__ModuleLoader__.load({
           h("h3", { style: { margin: 0 } }, t("version")),
           h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
             h("span", null, t("runningVersion")),
-            h("strong", null, status?.currentVersion || "0.5.0"),
+            h("strong", null, status?.currentVersion || "0.6.0"),
           ),
           status?.installedVersion && status.installedVersion !== status.currentVersion
             ? h(React.Fragment, null,
@@ -805,7 +805,7 @@ window.__ModuleLoader__.load({
           ),
           h(StatusLine, { label: t("updateStatus"), value: updateState, display: updateDisplay }),
           status?.restartRequired
-            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.5.0"} · ${t("updateRestart")}`)
+            ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.6.0"} · ${t("updateRestart")}`)
             : null,
           updateState === "failed"
             ? h("div", { style: gridStyle },
@@ -885,7 +885,7 @@ window.__ModuleLoader__.load({
             ),
             h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
               h("span", null, t("latestVersion")),
-              h("span", null, status?.latestVersion || status?.currentVersion || "0.5.0"),
+              h("span", null, status?.latestVersion || status?.currentVersion || "0.6.0"),
             ),
             h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
               h("span", null, t("lastChecked")),
