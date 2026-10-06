@@ -38,6 +38,7 @@ import {
   normalizePairingState,
   pairingRequest,
 } from "./lib/pairing.mjs";
+import { ChatBridgeController, bridgeReady } from "./lib/chat-bridge.mjs";
 import {
   AutoUpdateController,
   CONNECTOR_VERSION,
