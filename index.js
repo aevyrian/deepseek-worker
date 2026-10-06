@@ -61,6 +61,9 @@ export const Config = Schema.object({
   enableHeadlessFallback: Schema.boolean().default(true).volatile(),
   autoUpdate: Schema.boolean().default(true).volatile(),
   updateChannel: Schema.union([Schema.const("stable"), Schema.const("preview")]).default("stable").volatile(),
+  chatBridgeEnabled: Schema.boolean().default(true).volatile(),
+  chatBridgeChatUrl: Schema.string().default("").volatile(),
+  chatBridgeDebugPort: Schema.number().step(1).min(1024).max(65535).default(9223).volatile(),
   headlessCommand: Schema.string().pattern(/\S/u).default("dsh").volatile(),
   headlessArgs: Schema.array(Schema.string()).default(["--profile", "headless", "--json"]).volatile(),
 });
@@ -148,6 +151,12 @@ function initialRuntime() {
     workerBusy: false,
     activeTaskCount: 0,
     maxConcurrentTasks: 24,
+    bridgeBrowser: "unknown",
+    bridgeState: "unbound",
+    bridgeLastEventId: null,
+    bridgeLastMessageKey: null,
+    bridgeLastSentAt: null,
+    bridgeLastError: null,
     lastError: null,
   };
 }
@@ -164,6 +173,11 @@ export class WorkerControlService extends TypertRemoteService {
     super(ctx, "deepseekWorkerConnectorControl", { namespace: "deepseekWorkerConnector" });
     this.input = input;
     this.runtime = initialRuntime();
+    this.bridge = new ChatBridgeController({
+      runtime: this.runtime,
+      getConfig: () => currentConfig(this.input),
+      logger: ctx.logger,
+    });
     this.updater = new AutoUpdateController({
       runtime: this.runtime,
       getConfig: () => currentConfig(this.input),
@@ -216,7 +230,7 @@ export class WorkerControlService extends TypertRemoteService {
 
     ctx.effect(() => {
       const lifecycle = new AbortController();
-      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal).catch((error) => {
+      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal, this.bridge).catch((error) => {
         if (!lifecycle.signal.aborted) {
           ctx.logger.error("deepseek-worker connector stopped: %s", redactSecret(error));
         }
@@ -271,6 +285,7 @@ export class WorkerControlService extends TypertRemoteService {
         workspaceCount: workspaces.count,
         missingWorkspaceIds: workspaces.missing,
         trustedWorkspaceMode: config.trustedWorkspaceMode,
+        chatBridge: this.bridge.status(),
       });
     } catch (error) {
       return publicRuntimeStatus(
@@ -577,6 +592,27 @@ export class WorkerControlService extends TypertRemoteService {
     return publicUpdateStatus(this.runtime);
   }
 
+  async openBridgeBrowser() {
+    try {
+      return { ok: true, ...(await this.bridge.openLoginBrowser()) };
+    } catch (error) {
+      return { ok: false, code: "bridge_browser_failed", message: redactSecret(error), ...this.bridge.status() };
+    }
+  }
+
+  async testBridge() {
+    const config = currentConfig(this.input);
+    const state = this.bridge.status();
+    if (!config.chatBridgeEnabled) return { ok: false, code: "bridge_disabled", ...state };
+    if (!config.chatBridgeChatUrl) return { ok: false, code: "bridge_unbound", ...state };
+    try {
+      await this.bridge.ensureBrowser({ openHome: false });
+      return { ok: true, ...this.bridge.status() };
+    } catch (error) {
+      return { ok: false, code: "bridge_browser_failed", message: redactSecret(error), ...this.bridge.status() };
+    }
+  }
+
   async test() {
     let config;
     try {
@@ -669,7 +705,7 @@ for (const method of ["status", "generateToken", "test", "beginPairing", "pairin
 
 export default WorkerControlService;
 
-async function runWorker(ctx, input, runtime, signal) {
+async function runWorker(ctx, input, runtime, signal, bridge) {
   let registeredToken;
   let registeredSignature = "";
   let lastHeartbeatAt = 0;
@@ -769,12 +805,14 @@ async function runWorker(ctx, input, runtime, signal) {
         clientVersion: CONNECTOR_VERSION,
       });
       if (registeredSignature !== registrationSignature || registeredToken !== token) {
-        await workerRequest(config, token, "register", {
+        const registered = await workerRequest(config, token, "register", {
           hostname: hostname(),
           state: presenceState,
           ...workspacePayload,
           client_version: CONNECTOR_VERSION,
+          chat_bridge_ready: bridgeReady(runtime, config),
         }, signal);
+        await deliverBridgePayloads(config, token, registered, bridge, signal);
         registeredSignature = registrationSignature;
         registeredToken = token;
         lastHeartbeatAt = 0;
@@ -784,11 +822,13 @@ async function runWorker(ctx, input, runtime, signal) {
       }
 
       if (Date.now() - lastHeartbeatAt >= config.heartbeatIntervalMs) {
-        await workerRequest(config, token, "heartbeat", {
+        const heartbeat = await workerRequest(config, token, "heartbeat", {
           state: presenceState,
           ...workspacePayload,
           client_version: CONNECTOR_VERSION,
+          chat_bridge_ready: bridgeReady(runtime, config),
         }, signal);
+        await deliverBridgePayloads(config, token, heartbeat, bridge, signal);
         lastHeartbeatAt = Date.now();
         runtime.lastHeartbeat = new Date(lastHeartbeatAt).toISOString();
         runtime.cloud = "online";
@@ -824,7 +864,7 @@ async function runWorker(ctx, input, runtime, signal) {
       await fillTaskPool(
         activeTasks,
         () => workerRequest(config, token, "claim", {}, signal),
-        (task) => processLease(ctx, config, token, task, signal),
+        (task) => processLease(ctx, config, token, task, signal, bridge),
         signal,
       );
     } catch (error) {
@@ -860,7 +900,7 @@ async function sleep(ms, signal) {
   }
 }
 
-export async function processLease(ctx, config, token, task, outerSignal) {
+export async function processLease(ctx, config, token, task, outerSignal, bridge = null) {
   const leaseAbort = new AbortController();
   const relayAbort = () => leaseAbort.abort(outerSignal.reason);
   outerSignal.addEventListener("abort", relayAbort, { once: true });
@@ -886,7 +926,7 @@ export async function processLease(ctx, config, token, task, outerSignal) {
     if (leaseLost || leaseAbort.signal.aborted && !outerSignal.aborted) {
       throw leaseAbort.signal.reason || new Error("Worker lease was lost");
     }
-    await workerRequest(config, token, "result", {
+    const terminal = await workerRequest(config, token, "result", {
       task_id: task.id,
       result: execution.result,
       session_id: execution.sessionId,
@@ -896,17 +936,42 @@ export async function processLease(ctx, config, token, task, outerSignal) {
         trusted_workspace: config.trustedWorkspaceMode,
       },
     }, outerSignal);
+    await deliverBridgePayloads(config, token, terminal, bridge, outerSignal);
   } catch (error) {
     if (!leaseLost && !outerSignal.aborted) {
-      await workerRequest(config, token, "failure", {
+      const terminal = await workerRequest(config, token, "failure", {
         task_id: task.id,
         error: redactSecret(error, token),
-      }, outerSignal).catch(() => {});
+      }, outerSignal).catch(() => null);
+      await deliverBridgePayloads(config, token, terminal, bridge, outerSignal).catch(() => {});
     }
   } finally {
     leaseAbort.abort();
     outerSignal.removeEventListener("abort", relayAbort);
     await renewer.catch(() => {});
+  }
+}
+
+async function deliverBridgePayloads(config, token, response, bridge, signal) {
+  if (!bridge || !response || config.chatBridgeEnabled === false) return;
+  const rows = Array.isArray(response.bridge_deliveries)
+    ? response.bridge_deliveries
+    : response.bridge_delivery ? [response.bridge_delivery] : [];
+  for (const envelope of rows.slice(0, 8)) {
+    let success = false;
+    let errorMessage = null;
+    try {
+      await bridge.sendEnvelope(envelope);
+      success = true;
+    } catch (error) {
+      errorMessage = redactSecret(error, token).slice(0, 500);
+    }
+    await workerRequest(config, token, "bridge/ack", {
+      delivery_id: envelope?.delivery_id,
+      message_key: envelope?.message_key,
+      success,
+      error: success ? null : errorMessage,
+    }, signal).catch(() => {});
   }
 }
 
