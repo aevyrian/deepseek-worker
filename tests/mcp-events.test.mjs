@@ -76,8 +76,9 @@ test("events/subscribe verifies callback before persisting subscription", async 
     taskId: "task-a",
     owner: OWNER,
     status: "completed",
+    occurredAt: new Date("2026-10-06T10:00:01Z"),
   });
-  assert.equal(core.dueDeliveries().length, 1);
+  assert.equal(core.dueDeliveries(new Date("2026-10-06T10:00:01Z")).length, 1);
 });
 
 test("events/subscribe does not store a subscription when callback verification fails", async () => {
