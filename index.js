@@ -39,6 +39,9 @@ import {
   pairingRequest,
 } from "./lib/pairing.mjs";
 import { ChatBridgeController, bridgeReady } from "./lib/chat-bridge.mjs";
+import { BridgeWakeOutbox } from "./lib/bridge-outbox.mjs";
+import { WakeCoordinator } from "./lib/wake-coordinator.mjs";
+import { WakeTransport } from "./lib/wake-transport.mjs";
 import {
   AutoUpdateController,
   CONNECTOR_VERSION,
@@ -179,6 +182,19 @@ export class WorkerControlService extends TypertRemoteService {
       getConfig: () => currentConfig(this.input),
       logger: ctx.logger,
     });
+    this.bridgeOutbox = new BridgeWakeOutbox();
+    this.wakeTransport = new WakeTransport({
+      outbox: this.bridgeOutbox,
+      bridge: this.bridge,
+      enabled: () => currentConfig(this.input).chatBridgeEnabled,
+      logger: ctx.logger,
+    });
+    this.wakeCoordinator = new WakeCoordinator({
+      outbox: this.bridgeOutbox,
+      transport: this.wakeTransport,
+      enabled: () => currentConfig(this.input).chatBridgeEnabled,
+      logger: ctx.logger,
+    });
     this.updater = new AutoUpdateController({
       runtime: this.runtime,
       getConfig: () => currentConfig(this.input),
@@ -231,7 +247,18 @@ export class WorkerControlService extends TypertRemoteService {
 
     ctx.effect(() => {
       const lifecycle = new AbortController();
-      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal, this.bridge).catch((error) => {
+      const transport = this.wakeTransport.run(lifecycle.signal).catch((error) => {
+        if (!lifecycle.signal.aborted) ctx.logger.warn("deepseek-worker wake transport stopped: %s", redactSecret(error));
+      });
+      return async () => {
+        lifecycle.abort(new Error("DeepSeek Worker Connector stopped"));
+        await transport;
+      };
+    }, "deepseek-worker-connector: wake transport");
+
+    ctx.effect(() => {
+      const lifecycle = new AbortController();
+      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal, this.wakeCoordinator).catch((error) => {
         if (!lifecycle.signal.aborted) {
           ctx.logger.error("deepseek-worker connector stopped: %s", redactSecret(error));
         }
@@ -706,7 +733,7 @@ for (const method of ["status", "generateToken", "test", "beginPairing", "pairin
 
 export default WorkerControlService;
 
-async function runWorker(ctx, input, runtime, signal, bridge) {
+async function runWorker(ctx, input, runtime, signal, wakeCoordinator) {
   let registeredToken;
   let registeredSignature = "";
   let lastHeartbeatAt = 0;
@@ -813,7 +840,7 @@ async function runWorker(ctx, input, runtime, signal, bridge) {
           client_version: CONNECTOR_VERSION,
           chat_bridge_ready: bridgeReady(runtime, config),
         }, signal);
-        await deliverBridgePayloads(config, token, registered, bridge, signal);
+        await deliverBridgePayloads(config, registered, wakeCoordinator);
         registeredSignature = registrationSignature;
         registeredToken = token;
         lastHeartbeatAt = 0;
@@ -829,7 +856,7 @@ async function runWorker(ctx, input, runtime, signal, bridge) {
           client_version: CONNECTOR_VERSION,
           chat_bridge_ready: bridgeReady(runtime, config),
         }, signal);
-        await deliverBridgePayloads(config, token, heartbeat, bridge, signal);
+        await deliverBridgePayloads(config, heartbeat, wakeCoordinator);
         lastHeartbeatAt = Date.now();
         runtime.lastHeartbeat = new Date(lastHeartbeatAt).toISOString();
         runtime.cloud = "online";
@@ -865,7 +892,7 @@ async function runWorker(ctx, input, runtime, signal, bridge) {
       await fillTaskPool(
         activeTasks,
         () => workerRequest(config, token, "claim", {}, signal),
-        (task) => processLease(ctx, config, token, task, signal, bridge),
+        (task) => processLease(ctx, config, token, task, signal, wakeCoordinator),
         signal,
       );
     } catch (error) {
@@ -901,7 +928,7 @@ async function sleep(ms, signal) {
   }
 }
 
-export async function processLease(ctx, config, token, task, outerSignal, bridge = null) {
+export async function processLease(ctx, config, token, task, outerSignal, wakeCoordinator = null) {
   const leaseAbort = new AbortController();
   const relayAbort = () => leaseAbort.abort(outerSignal.reason);
   outerSignal.addEventListener("abort", relayAbort, { once: true });
@@ -911,23 +938,41 @@ export async function processLease(ctx, config, token, task, outerSignal, bridge
     leaseAbort.abort(error);
   });
   try {
-    const { workspaceId } = workspaceForTask(config, task);
-    const workspace = ctx.workspaceRegistry.get(workspaceId);
-    if (workspace === undefined) throw new Error(`Authorized Harness Workspace "${workspaceId}" no longer exists`);
-    const prompt = buildTaskPrompt(task);
-    await workerRequest(config, token, "events", {
-      task_id: task.id,
-      event: "local_started",
-      data: { workspace_id: workspaceId, trusted_workspace: config.trustedWorkspaceMode },
-    }, outerSignal);
-    const controller = currentSessionController(ctx);
-    const execution = controller
-      ? await executeNativeSession(ctx, controller, task, workspace, prompt, leaseAbort.signal, config.leaseWaitTimeoutMs)
-      : await executeHeadless(config, task, workspace, prompt, leaseAbort.signal);
-    if (leaseLost || leaseAbort.signal.aborted && !outerSignal.aborted) {
-      throw leaseAbort.signal.reason || new Error("Worker lease was lost");
+    let workspaceId;
+    let workspace;
+    let execution;
+    try {
+      ({ workspaceId } = workspaceForTask(config, task));
+      workspace = ctx.workspaceRegistry.get(workspaceId);
+      if (workspace === undefined) throw new Error(`Authorized Harness Workspace "${workspaceId}" no longer exists`);
+      const prompt = buildTaskPrompt(task);
+      await workerRequest(config, token, "events", {
+        task_id: task.id,
+        event: "local_started",
+        data: { workspace_id: workspaceId, trusted_workspace: config.trustedWorkspaceMode },
+      }, outerSignal);
+      const controller = currentSessionController(ctx);
+      execution = controller
+        ? await executeNativeSession(ctx, controller, task, workspace, prompt, leaseAbort.signal, config.leaseWaitTimeoutMs)
+        : await executeHeadless(config, task, workspace, prompt, leaseAbort.signal);
+    } catch (error) {
+      if (!leaseLost && !outerSignal.aborted) {
+        const failure = await workerRequest(config, token, "failure", {
+          task_id: task.id,
+          error: redactSecret(error, token),
+        }, outerSignal).catch((uploadError) => {
+          ctx.logger?.warn?.("deepseek-worker task %s failure upload failed: %s", task.id, redactSecret(uploadError, token));
+          return null;
+        });
+        if (failure) {
+          await enqueueTerminalWake(ctx, config, failure, wakeCoordinator, { taskId: task.id, terminalState: "failed" });
+        }
+      }
+      return;
     }
-    const terminal = await workerRequest(config, token, "result", {
+    if (leaseLost || leaseAbort.signal.aborted && !outerSignal.aborted) return;
+
+    const result = await workerRequest(config, token, "result", {
       task_id: task.id,
       result: execution.result,
       session_id: execution.sessionId,
@@ -936,15 +981,12 @@ export async function processLease(ctx, config, token, task, outerSignal, bridge
         workspace_id: workspaceId,
         trusted_workspace: config.trustedWorkspaceMode,
       },
-    }, outerSignal);
-    await deliverBridgePayloads(config, token, terminal, bridge, outerSignal);
-  } catch (error) {
-    if (!leaseLost && !outerSignal.aborted) {
-      const terminal = await workerRequest(config, token, "failure", {
-        task_id: task.id,
-        error: redactSecret(error, token),
-      }, outerSignal).catch(() => null);
-      await deliverBridgePayloads(config, token, terminal, bridge, outerSignal).catch(() => {});
+    }, outerSignal).catch((error) => {
+      ctx.logger?.warn?.("deepseek-worker task %s result upload failed: %s", task.id, redactSecret(error, token));
+      return null;
+    });
+    if (result) {
+      await enqueueTerminalWake(ctx, config, result, wakeCoordinator, { taskId: task.id, terminalState: "completed" });
     }
   } finally {
     leaseAbort.abort();
@@ -953,27 +995,17 @@ export async function processLease(ctx, config, token, task, outerSignal, bridge
   }
 }
 
-async function deliverBridgePayloads(config, token, response, bridge, signal) {
-  if (!bridge || !response || config.chatBridgeEnabled === false) return;
-  const rows = Array.isArray(response.bridge_deliveries)
-    ? response.bridge_deliveries
-    : response.bridge_delivery ? [response.bridge_delivery] : [];
-  for (const envelope of rows.slice(0, 8)) {
-    let success = false;
-    let errorMessage = null;
-    try {
-      await bridge.sendEnvelope(envelope);
-      success = true;
-    } catch (error) {
-      errorMessage = redactSecret(error, token).slice(0, 500);
-    }
-    await workerRequest(config, token, "bridge/ack", {
-      delivery_id: envelope?.delivery_id,
-      message_key: envelope?.message_key,
-      success,
-      error: success ? null : errorMessage,
-    }, signal).catch(() => {});
+async function enqueueTerminalWake(ctx, config, response, wakeCoordinator, terminal) {
+  try {
+    await deliverBridgePayloads(config, response, wakeCoordinator, terminal);
+  } catch (error) {
+    ctx.logger?.warn?.("deepseek-worker task %s terminal was uploaded but its wake could not be persisted: %s", terminal.taskId, redactSecret(error));
   }
+}
+
+export async function deliverBridgePayloads(config, response, wakeCoordinator, terminal = null) {
+  if (!wakeCoordinator || !response || config.chatBridgeEnabled === false) return { accepted: 0, localWake: null };
+  return wakeCoordinator.acceptResponse(response, terminal);
 }
 
 async function renewLease(config, token, taskId, signal) {

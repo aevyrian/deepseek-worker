@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import WorkerControlService, { processLease } from "../../index.js";
+import { BridgeWakeOutbox } from "../../lib/bridge-outbox.mjs";
+import { WakeCoordinator } from "../../lib/wake-coordinator.mjs";
 import { remoteMethods } from "@deepseek-ai/dsh-typert-protocol";
 
 class HostContext {
@@ -102,8 +107,11 @@ async function gatewayInvoke(ctx, namespace, method) {
 const ctx = new HostContext();
 let pairingState = "pending";
 let startMode = "ok";
+let failureUploadStatus = 200;
 const requests = [];
 const originalFetch = globalThis.fetch;
+const outboxDirectory = await mkdtemp(join(tmpdir(), "dsw-host-probe-"));
+process.env.DEEPSEEK_WORKER_BRIDGE_WAKE_OUTBOX_PATH = join(outboxDirectory, "service-outbox.json");
 
 globalThis.fetch = async (url, init = {}) => {
   const parsed = new URL(url);
@@ -126,7 +134,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
     assert.equal(init.headers.authorization, undefined);
     assert.match(body.token_hash, /^[0-9a-f]{64}$/);
-    assert.equal(body.client_version, "0.7.0");
+    assert.equal(body.client_version, "0.7.1");
     assert.deepEqual(body.workspace_allowlist, ["workspace-a"]);
     return new Response(JSON.stringify({
       state: "pending",
@@ -165,8 +173,8 @@ globalThis.fetch = async (url, init = {}) => {
   }
 
   if (parsed.pathname === "/api/worker/events" || parsed.pathname === "/api/worker/result" || parsed.pathname === "/api/worker/failure" || parsed.pathname === "/api/worker/lease/renew") {
-    return new Response(JSON.stringify({ ok: true }), {
-      status: 200,
+    return new Response(JSON.stringify({ ok: true, ...(parsed.pathname === "/api/worker/result" || parsed.pathname === "/api/worker/failure" ? { project_id: "project-test" } : {}) }), {
+      status: parsed.pathname === "/api/worker/failure" ? failureUploadStatus : 200,
       headers: { "content-type": "application/json" },
     });
   }
@@ -198,7 +206,7 @@ try {
 
   const status = await gatewayInvoke(ctx, "deepseekWorkerConnector", "status");
   assert.equal(status.execution, "native");
-  assert.equal(status.currentVersion, "0.7.0");
+  assert.equal(status.currentVersion, "0.7.1");
   assert.equal(status.updateState, "idle");
 
   const generated = await gatewayInvoke(ctx, "deepseekWorkerConnector", "generateToken");
@@ -307,9 +315,13 @@ try {
     trustedWorkspaceMode: true,
     leaseRenewIntervalMs: 5000,
     leaseWaitTimeoutMs: 1000,
+    chatBridgeEnabled: true,
   };
+  const testOutbox = new BridgeWakeOutbox({ filePath: join(outboxDirectory, "pipeline-outbox.json") });
+  await testOutbox.initialize();
+  const testWakeCoordinator = new WakeCoordinator({ outbox: testOutbox, transport: { kick() {} } });
   const task = { id: "task-native", workspace_id: "workspace-a", prompt: "Read OS" };
-  await processLease(ctx, workerConfig, "test-token", task, new AbortController().signal);
+  await processLease(ctx, workerConfig, "test-token", task, new AbortController().signal, testWakeCoordinator);
   assert.equal(createCalls, 1);
   const nativeRequests = requests.filter((request) => request.path.startsWith("/api/worker/"));
   assert.deepEqual(nativeRequests.map((request) => request.path), [
@@ -320,16 +332,33 @@ try {
   assert.equal(nativeRequests[1].body.session_id, "session-e2e");
   assert.equal(nativeRequests[1].body.metadata.executor, "harness-native");
   assert.equal(nativeRequests[1].body.metadata.workspace_id, "workspace-a");
+  const completedWakes = await testOutbox.listPending();
+  assert.equal(completedWakes.length, 1);
+  assert.equal(completedWakes[0].terminal_state, "completed");
 
   requests.length = 0;
   ctx.registerService("sessionController", {
     async create() { throw new Error("Native Session failed"); },
   });
-  await processLease(ctx, workerConfig, "test-token", { ...task, id: "task-native-fail" }, new AbortController().signal);
+  await processLease(ctx, workerConfig, "test-token", { ...task, id: "task-native-fail" }, new AbortController().signal, testWakeCoordinator);
   const failureRequest = requests.find((request) => request.path === "/api/worker/failure");
   assert.ok(failureRequest, "Native Session exceptions must use the normal failure upload path");
   assert.match(failureRequest.body.error, /Native Session failed/);
+  const wakesAfterFailure = await testOutbox.listPending();
+  assert.equal(wakesAfterFailure.length, 2);
+  assert.equal(wakesAfterFailure.find((wake) => wake.task_id === "task-native-fail")?.terminal_state, "failed");
+
+  requests.length = 0;
+  failureUploadStatus = 503;
+  await processLease(ctx, workerConfig, "test-token", { ...task, id: "task-failure-upload-fail" }, new AbortController().signal, testWakeCoordinator);
+  assert.equal(requests.filter((request) => request.path === "/api/worker/failure").length, 1);
+  assert.equal((await testOutbox.listPending()).length, 2, "failed terminal upload must not create a wake");
+  failureUploadStatus = 200;
+
+  requests.length = 0;
 } finally {
   globalThis.fetch = originalFetch;
   await ctx.dispose();
+  await rm(outboxDirectory, { recursive: true, force: true });
+  delete process.env.DEEPSEEK_WORKER_BRIDGE_WAKE_OUTBOX_PATH;
 }

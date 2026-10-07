@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1 — Production v13 Chat Bridge Compatibility
+
+- 在 Cloud terminal result/failure 成功响应未包含正式 `bridge_delivery` 时，启用 Chat Bridge 创建本地 durable wake outbox 记录，并以 project/task/terminal state 确定性生成 message key。
+- 重启时恢复未完成的本地及 Cloud delivery；Cloud 正式 delivery 优先，并抑制同一终态任务的本地 wake，避免双重唤醒。
+- `[DSW]` 仅发送 `PROJECT_EVENT_PENDING`、项目/任务 ID 与 message key；浏览器发送成功只确认本地投递，不调用 Cloud bridge ack 或确认 Project Event。
+- Production Site v13 和 D1 schema 无需变更。
+
 ## 0.7.0 — Free Dual Channel
 
 - 第一原则改为免费可用：正式总控只保留 `native / bridge / auto`，移除 0.6.0 的 OpenAI Responses API 付费 fallback。

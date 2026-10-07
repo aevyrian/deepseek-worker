@@ -24,5 +24,7 @@ jobs:
           node --check lib/native-session.mjs
           node --check lib/pairing.mjs
           node --check lib/update.mjs
+          node --check lib/chat-bridge.mjs
+          node --check lib/bridge-outbox.mjs
       - name: Unit tests
         run: npm test
