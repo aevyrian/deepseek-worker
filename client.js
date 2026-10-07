@@ -71,6 +71,17 @@ window.__ModuleLoader__.load({
       chatBridgeUnbound: "未绑定",
       chatBridgeReady: "可用",
       chatBridgeNeedsLogin: "需要登录",
+      chatBridgeStatus: "桥接状态",
+      chatBridgeBinding: "对话绑定",
+      chatBridgeIdle: "未测试",
+      chatBridgeChecking: "检查中",
+      chatBridgeSending: "发送中",
+      chatBridgeError: "错误",
+      chatBridgeUnknown: "未知",
+      chatBridgeDisabled: "已停用",
+      chatBridgeInvalidUrl: "请输入有效的 HTTPS ChatGPT 对话 URL。",
+      chatBridgeInvalidPort: "桥接浏览器端口必须在 1024–65535 之间。",
+      chatBridgeUnavailable: "Chat Bridge 暂不可用。",
       advanced: "高级 / 诊断",
       endpoint: "Cloud Endpoint",
       workerId: "Worker ID",
@@ -165,6 +176,17 @@ window.__ModuleLoader__.load({
       chatBridgeUnbound: "Not bound",
       chatBridgeReady: "Ready",
       chatBridgeNeedsLogin: "Sign-in required",
+      chatBridgeStatus: "Bridge status",
+      chatBridgeBinding: "Chat binding",
+      chatBridgeIdle: "Not tested",
+      chatBridgeChecking: "Checking",
+      chatBridgeSending: "Sending",
+      chatBridgeError: "Error",
+      chatBridgeUnknown: "Unknown",
+      chatBridgeDisabled: "Disabled",
+      chatBridgeInvalidUrl: "Enter a valid HTTPS ChatGPT conversation URL.",
+      chatBridgeInvalidPort: "Bridge browser port must be between 1024 and 65535.",
+      chatBridgeUnavailable: "Chat Bridge is unavailable.",
       advanced: "Advanced / Diagnostics",
       token: "Manual Worker Token",
       setToken: "Enter compatibility Token",
@@ -329,6 +351,58 @@ window.__ModuleLoader__.load({
       return "idle";
     }
 
+    function chatBridgeStatusKey(status) {
+      if (!status) return "chatBridgeUnknown";
+      if (status.enabled === false) return "chatBridgeDisabled";
+      switch (status.state) {
+        case "unbound": return "chatBridgeUnbound";
+        case "idle": return "chatBridgeIdle";
+        case "checking": return "chatBridgeChecking";
+        case "sending": return "chatBridgeSending";
+        case "sent":
+        case "ready": return "chatBridgeReady";
+        case "needs-login": return "chatBridgeNeedsLogin";
+        case "error":
+        case "invalid-binding": return "chatBridgeError";
+        default: return "chatBridgeUnknown";
+      }
+    }
+
+    async function runBridgeAction({ form, draft, action, setMessage, refreshStatus, t }) {
+      setMessage("");
+      try {
+        if (!form?.state?.writable || typeof form.mutate !== "function") throw new Error(t("saveFailed"));
+        const chatBridgeChatUrl = String(draft.chatBridgeChatUrl || "").trim();
+        if (chatBridgeChatUrl) {
+          let url;
+          try { url = new URL(chatBridgeChatUrl); } catch {}
+          if (!url || url.protocol !== "https:" || !["chatgpt.com", "www.chatgpt.com"].includes(url.hostname.toLowerCase())
+            || url.username || url.password || url.pathname.startsWith("/auth")
+            || url.pathname.startsWith("/plugins") || url.pathname.startsWith("/#settings")) {
+            throw new Error(t("chatBridgeInvalidUrl"));
+          }
+        }
+        const chatBridgeDebugPort = Number(draft.chatBridgeDebugPort);
+        if (!Number.isInteger(chatBridgeDebugPort) || chatBridgeDebugPort < 1024 || chatBridgeDebugPort > 65535) {
+          throw new Error(t("chatBridgeInvalidPort"));
+        }
+        const saved = await form.mutate([
+          { op: "set", path: ["chatBridgeEnabled"], value: draft.chatBridgeEnabled !== false },
+          { op: "set", path: ["chatBridgeChatUrl"], value: chatBridgeChatUrl },
+          { op: "set", path: ["chatBridgeDebugPort"], value: chatBridgeDebugPort },
+        ], form.state.revision);
+        if (!saved) throw new Error(t("saveFailed"));
+        const result = await action();
+        if (!result?.ok) throw new Error(result?.message || t("chatBridgeUnavailable"));
+        return true;
+      } catch (error) {
+        setMessage(error instanceof Error && error.message ? error.message : t("chatBridgeUnavailable"));
+        return false;
+      } finally {
+        try { await refreshStatus?.(); } catch {}
+      }
+    }
+
     function StatusLine({ label, value, display }) {
       return h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
         h("span", null, label),
@@ -377,6 +451,8 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = useState(false);
       const [saveMessage, setSaveMessage] = useState("");
       const [workspaceMessage, setWorkspaceMessage] = useState("");
+      const [bridgeMessage, setBridgeMessage] = useState("");
+      const [bridgeBusy, setBridgeBusy] = useState(false);
 
       const workspaceSnapshot = useSyncExternalStore(
         actions.subscribeWorkspaces,
@@ -502,6 +578,16 @@ window.__ModuleLoader__.load({
           return false;
         } finally {
           setSaving(false);
+        }
+      };
+
+      const performBridgeAction = async (action) => {
+        if (bridgeBusy) return;
+        setBridgeBusy(true);
+        try {
+          await runBridgeAction({ form, draft, action, setMessage: setBridgeMessage, refreshStatus, t });
+        } finally {
+          setBridgeBusy(false);
         }
       };
 
@@ -817,32 +903,26 @@ window.__ModuleLoader__.load({
           h("div", { style: rowStyle },
             h(Button, {
               variant: "primary",
-              onClick: async () => {
-                const saved = await saveConfig();
-                if (!saved) return;
-                const result = await actions.openBridgeBrowser();
-                setStatusMessage(result?.ok ? "" : (result?.message || "Chat Bridge unavailable"));
-                await refreshStatus();
-              },
+              disabled: bridgeBusy,
+              onClick: () => void performBridgeAction(actions.openBridgeBrowser),
             }, t("chatBridgeOpen")),
             h(Button, {
               variant: "outline",
-              onClick: async () => {
-                const saved = await saveConfig();
-                if (!saved) return;
-                const result = await actions.testBridge();
-                setStatusMessage(result?.ok ? "" : (result?.message || "Chat Bridge unavailable"));
-                await refreshStatus();
-              },
+              disabled: bridgeBusy,
+              onClick: () => void performBridgeAction(actions.testBridge),
             }, t("chatBridgeTest")),
           ),
+          bridgeMessage ? h("p", { role: "status", style: mutedStyle }, bridgeMessage) : null,
           h("div", { style: gridStyle },
             h(StatusLine, {
-              label: t("chatBridge"),
+              label: t("chatBridgeStatus"),
               value: status?.chatBridge?.state || "unknown",
-              display: status?.chatBridge?.bound
-                ? (status?.chatBridge?.state === "needs-login" ? t("chatBridgeNeedsLogin") : t("chatBridgeReady"))
-                : t("chatBridgeUnbound"),
+              display: t(chatBridgeStatusKey(status?.chatBridge)),
+            }),
+            h(StatusLine, {
+              label: t("chatBridgeBinding"),
+              value: status?.chatBridge?.bound ? "bound" : "unbound",
+              display: t(status?.chatBridge?.bound ? "chatBridgeBound" : "chatBridgeUnbound"),
             }),
             status?.chatBridge?.lastSentAt
               ? h("p", { style: mutedStyle }, `Last sent: ${status.chatBridge.lastSentAt}`)
@@ -1112,6 +1192,8 @@ window.__ModuleLoader__.load({
         connectionUrl,
         createPairingPoller,
         restorePairingConnection,
+        chatBridgeStatusKey,
+        runBridgeAction,
       },
       async apply(ctx) {
         const disposeRemote = await ctx.remote.$mount(contribution);

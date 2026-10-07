@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3 — Chat Bridge Reliability
+
+- Bridge Test accepts the bound ChatGPT conversation across query/hash changes and SPA navigation while still requiring the exact conversation pathname and composer, without sending a message.
+- Bridge settings distinguish operational states instead of treating a configured binding as ready.
+- Bridge Open/Test save only Bridge settings, so unrelated invalid configuration does not block the action; Bridge-specific save failures remain visible.
+- WakeCoordinator, WakeTransport, durable outbox, and orchestration behavior are unchanged.
+
 ## 0.7.2 — Chat Bridge Browser Interaction
 
 - Opening the Chat Bridge sign-in browser now activates an existing ChatGPT tab or creates one, restores its window, and brings it forward.

@@ -174,6 +174,96 @@ test("Client mounts all Connector Remotes and keeps manual Token compatibility",
   assert.equal(disposed.mounted, false);
 });
 
+test("Chat Bridge status labels distinguish binding, checking, login, ready and error", async () => {
+  const { source, exports } = await loadClientPlugin();
+  const label = exports.__test.chatBridgeStatusKey;
+  assert.equal(label({ enabled: true, state: "idle", bound: true }), "chatBridgeIdle");
+  assert.equal(label({ enabled: true, state: "checking", bound: true }), "chatBridgeChecking");
+  assert.equal(label({ enabled: true, state: "needs-login", bound: true }), "chatBridgeNeedsLogin");
+  assert.equal(label({ enabled: true, state: "ready", bound: true }), "chatBridgeReady");
+  assert.equal(label({ enabled: true, state: "error", bound: true }), "chatBridgeError");
+  assert.equal(label({ enabled: true, state: "sent", bound: true }), "chatBridgeReady");
+  assert.equal(label({ enabled: false, state: "idle", bound: true }), "chatBridgeDisabled");
+  assert.match(source, /label: t\("chatBridgeStatus"\)/u);
+  assert.match(source, /label: t\("chatBridgeBinding"\)/u);
+  assert.match(source, /bridgeMessage \? h\("p", \{ role: "status", style: mutedStyle \}/u);
+  assert.doesNotMatch(source, /status\?\.chatBridge\?\.bound\s*\?[^:]+chatBridgeReady/u);
+});
+
+test("Bridge buttons persist only Bridge settings even when an unrelated endpoint is invalid", async () => {
+  const { exports } = await loadClientPlugin();
+  let operations;
+  let actionCalls = 0;
+  let visibleMessage = "old error";
+  let refreshed = false;
+  const form = {
+    state: { revision: 17, writable: true },
+    async mutate(nextOperations, revision) {
+      operations = nextOperations;
+      assert.equal(revision, 17);
+      return true;
+    },
+  };
+  const ok = await exports.__test.runBridgeAction({
+    form,
+    draft: {
+      endpoint: "invalid unrelated endpoint",
+      chatBridgeEnabled: true,
+      chatBridgeChatUrl: "https://chatgpt.com/c/bound?model=auto",
+      chatBridgeDebugPort: "9223",
+    },
+    async action() { actionCalls += 1; return { ok: true }; },
+    setMessage(value) { visibleMessage = value; },
+    async refreshStatus() { refreshed = true; },
+    t: (key) => key,
+  });
+  assert.equal(ok, true);
+  assert.deepEqual(Array.from(operations, ({ path: field }) => Array.from(field)), [
+    ["chatBridgeEnabled"], ["chatBridgeChatUrl"], ["chatBridgeDebugPort"],
+  ]);
+  assert.equal(operations[2].value, 9223);
+  assert.equal(actionCalls, 1);
+  assert.equal(visibleMessage, "");
+  assert.equal(refreshed, true);
+});
+
+test("Bridge save failure blocks the remote action and leaves a Bridge-local status message", async () => {
+  const { source, exports } = await loadClientPlugin();
+  let actionCalls = 0;
+  let visibleMessage = "";
+  const ok = await exports.__test.runBridgeAction({
+    form: { state: { revision: 3, writable: true }, async mutate() { return false; } },
+    draft: { endpoint: "https://invalid-for-bridge.example", chatBridgeEnabled: true, chatBridgeChatUrl: "", chatBridgeDebugPort: "9223" },
+    async action() { actionCalls += 1; return { ok: true }; },
+    setMessage(value) { visibleMessage = value; },
+    async refreshStatus() {},
+    t: (key) => key,
+  });
+  assert.equal(ok, false);
+  assert.equal(actionCalls, 0);
+  assert.equal(visibleMessage, "saveFailed");
+  assert.match(source, /bridgeMessage \? h\("p", \{ role: "status"/u);
+  assert.match(source, /onClick: \(\) => void performBridgeAction\(actions\.openBridgeBrowser\)/u);
+  assert.match(source, /onClick: \(\) => void performBridgeAction\(actions\.testBridge\)/u);
+});
+
+test("Bridge validation failures are visible and never invoke the remote action", async () => {
+  const { exports } = await loadClientPlugin();
+  let actionCalls = 0;
+  let message = "";
+  const ok = await exports.__test.runBridgeAction({
+    form: { state: { revision: 1, writable: true }, async mutate() { throw new Error("must not save"); } },
+    draft: { chatBridgeEnabled: true, chatBridgeChatUrl: "https://example.invalid/c/a", chatBridgeDebugPort: "9223" },
+    async action() { actionCalls += 1; return { ok: true }; },
+    setMessage(value) { message = value; },
+    async refreshStatus() {},
+    t: (key) => key,
+  });
+  assert.equal(ok, false);
+  assert.equal(actionCalls, 0);
+  assert.equal(message, "chatBridgeInvalidUrl");
+});
+
 test("Host Remote failures remain actionable for pairing methods", async () => {
   const leaked = "do-not-display-this-server-text";
   const failing = {};
