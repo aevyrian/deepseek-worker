@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.6 — Chat Bridge Runtime Diagnostics
+
+- 改进 Chat Bridge `testBridge` 运行态诊断，不再将 `Runtime.evaluate` 失败误报为 conversation 无法访问。
+- 为导航期间 transient CDP evaluation 错误增加有限重试，并增加基于 Target metadata 的实际 URL fallback。
+- 区分 conversation、navigation、page evaluation、page script、login 和 composer 错误；Host Remote 透传具体 Bridge error code。
+
 ## 0.7.5 — Chat Bridge Conversation Targeting
 
 - 修复多个 ChatGPT 页面同时打开时，`testBridge` 可能绑定到错误 target 的问题。

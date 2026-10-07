@@ -636,11 +636,20 @@ export class WorkerControlService extends TypertRemoteService {
     try {
       return await this.bridge.testBridge();
     } catch (error) {
+      const bridgeErrorCodes = new Set([
+        "bridge_login_required",
+        "bridge_conversation_unreachable",
+        "bridge_navigation_unstable",
+        "bridge_page_eval_failed",
+        "bridge_page_script_exception",
+        "bridge_composer_unavailable",
+      ]);
+      const code = bridgeErrorCodes.has(error?.code) ? error.code : "bridge_browser_failed";
       return {
         ok: false,
-        code: error?.code === "bridge_login_required" ? "bridge_login_required" : "bridge_browser_failed",
+        code,
         message: redactSecret(error),
-        state: error?.code === "bridge_login_required" ? "needs-login" : this.bridge.status().state,
+        state: code === "bridge_login_required" ? "needs-login" : this.bridge.status().state,
         ...this.bridge.status(),
       };
     }

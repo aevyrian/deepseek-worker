@@ -118,9 +118,20 @@ test("Controller deduplicates an already-sent message key before any browser acc
   assert.equal(result.deduplicated, true);
 });
 
-function fakeCdp({ login = false, pageUrl = "https://chatgpt.com/c/old", navigationUrl, spaUrls = [], targets } = {}) {
+function fakeCdp({
+  login = false,
+  pageUrl = "https://chatgpt.com/c/old",
+  navigationUrl,
+  spaUrls = [],
+  targets,
+  composerAvailable = true,
+  runtimeErrors = [],
+  runtimeError,
+  scriptException = false,
+} = {}) {
   const calls = [];
   const pendingSpaUrls = [...spaUrls];
+  const pendingRuntimeErrors = [...runtimeErrors];
   const targetInfos = targets ?? [{ targetId: "chat", type: "page", url: pageUrl }];
   const targetUrls = new Map(targetInfos.map((target) => [target.targetId, target.url]));
   let activeTargetId = targetInfos[0]?.targetId ?? null;
@@ -145,6 +156,13 @@ function fakeCdp({ login = false, pageUrl = "https://chatgpt.com/c/old", navigat
         href = targetUrls.get(activeTargetId);
         return { sessionId: "session" };
       }
+      if (method === "Target.getTargetInfo") {
+        if (navigated && pendingSpaUrls.length) {
+          href = pendingSpaUrls.shift();
+          targetUrls.set(params.targetId, href);
+        }
+        return { targetInfo: { targetId: params.targetId, type: "page", url: targetUrls.get(params.targetId) } };
+      }
       if (method === "Browser.getWindowForTarget") return { windowId: 1 };
       if (method === "Page.navigate") {
         navigated = true;
@@ -152,6 +170,12 @@ function fakeCdp({ login = false, pageUrl = "https://chatgpt.com/c/old", navigat
         targetUrls.set(activeTargetId, href);
       }
       if (method === "Runtime.evaluate") {
+        if (runtimeError) throw new Error(runtimeError);
+        if (pendingRuntimeErrors.length) throw new Error(pendingRuntimeErrors.shift());
+        if (scriptException) return { exceptionDetails: { text: "untrusted page exception text" } };
+        if (params.expression.includes("readyState")) {
+          return { result: { value: { href, readyState: "complete" } } };
+        }
         if (params.expression.includes("authRequired")) {
           if (navigated && pendingSpaUrls.length) {
             href = pendingSpaUrls.shift();
@@ -159,7 +183,9 @@ function fakeCdp({ login = false, pageUrl = "https://chatgpt.com/c/old", navigat
           }
           return { result: { value: { href: login ? "https://chatgpt.com/auth/login" : href, authRequired: login } } };
         }
-        if (params.expression.includes("composer_not_found")) return { result: { value: { ok: true, href } } };
+        if (params.expression.includes("composer_not_found")) {
+          return { result: { value: { ok: composerAvailable, reason: composerAvailable ? undefined : "composer_not_found", href } } };
+        }
       }
       return {};
     },
@@ -223,6 +249,46 @@ test("Bridge test creates the bound conversation target when no ChatGPT page exi
   assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "created-1"));
 });
 
+test("Bridge test retries a transient Runtime.evaluate navigation error", async () => {
+  const fake = fakeCdp({ runtimeErrors: ["Execution context was destroyed."] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.testBridge();
+  assert.equal(result.state, "ready");
+  assert.ok(fake.calls.filter(([method]) => method === "Runtime.evaluate").length >= 4);
+});
+
+test("Bridge test classifies persistent Runtime.evaluate errors and reports Target URL metadata", async () => {
+  const fake = fakeCdp({ runtimeError: "Runtime.evaluate failed during page startup" });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.testBridge(), (error) => {
+    assert.equal(error.code, "bridge_page_eval_failed");
+    assert.match(error.message, /期望：https:\/\/chatgpt\.com\/c\/bound/u);
+    assert.match(error.message, /实际：https:\/\/chatgpt\.com\/c\/bound/u);
+    assert.doesNotMatch(error.message, /绑定的 ChatGPT 对话无法访问/u);
+    return true;
+  });
+});
+
+test("Bridge test reports page script exceptions separately from CDP evaluation failures", async () => {
+  const fake = fakeCdp({ scriptException: true });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.testBridge(), (error) => {
+    assert.equal(error.code, "bridge_page_script_exception");
+    assert.doesNotMatch(error.message, /untrusted page exception text/u);
+    return true;
+  });
+});
+
+test("Bridge test distinguishes a valid conversation without a composer", async () => {
+  const fake = fakeCdp({ composerAvailable: false });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.testBridge(), (error) => error.code === "bridge_composer_unavailable");
+});
+
 test("Bridge test accepts an already-open bound pathname when ChatGPT changes query and hash", async () => {
   const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/bound?model=auto#answer" });
   const controller = fakeController(fake, "https://chatgpt.com/c/bound?model=some-model");
@@ -265,22 +331,15 @@ test("Bridge test rejects a genuinely different pathname without reaching ready"
   const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/other", navigationUrl: "https://chatgpt.com/c/other?access_token=must-not-appear#secret" });
   const controller = fakeController(fake);
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
-  const originalNow = Date.now;
-  let now = 0;
-  Date.now = () => { now += 25_000; return now; };
-  try {
-    await assert.rejects(controller.testBridge(), (error) => {
-      assert.match(error.message, /绑定的 ChatGPT 对话无法访问。/u);
-      assert.match(error.message, /期望：https:\/\/chatgpt\.com\/c\/bound/u);
-      assert.match(error.message, /实际：https:\/\/chatgpt\.com\/c\/other/u);
-      assert.equal(error.message.includes("must-not-appear"), false);
-      assert.equal(error.message.includes("secret"), false);
-      return true;
-    });
-    assert.equal(controller.status().state, "error");
-  } finally {
-    Date.now = originalNow;
-  }
+  await assert.rejects(controller.testBridge(), (error) => {
+    assert.equal(error.code, "bridge_conversation_unreachable");
+    assert.match(error.message, /期望：https:\/\/chatgpt\.com\/c\/bound/u);
+    assert.match(error.message, /实际：https:\/\/chatgpt\.com\/c\/other/u);
+    assert.equal(error.message.includes("must-not-appear"), false);
+    assert.equal(error.message.includes("secret"), false);
+    return true;
+  });
+  assert.equal(controller.status().state, "error");
 });
 
 test("Bridge test explicitly reports login required and never reports ready", async () => {
@@ -290,6 +349,18 @@ test("Bridge test explicitly reports login required and never reports ready", as
   await assert.rejects(controller.testBridge(), (error) => error.code === "bridge_login_required");
   assert.equal(controller.status().state, "needs-login");
   assert.ok(!fake.calls.some(([method]) => method === "Input.insertText" || method === "Input.dispatchKeyEvent"));
+});
+
+test("Bridge test exposes only safe Runtime.evaluate failure reason", async () => {
+  const fake = fakeCdp({ runtimeError: "Runtime.evaluate failed; token=secret-token" });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.testBridge(), (error) => {
+    assert.equal(error.code, "bridge_page_eval_failed");
+    assert.match(error.message, /runtime-evaluate-failed/u);
+    assert.doesNotMatch(error.message, /secret-token|token=/u);
+    return true;
+  });
 });
 
 test("pre-send visibility probe requires the complete project/task/message identity", () => {
