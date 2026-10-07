@@ -118,26 +118,45 @@ test("Controller deduplicates an already-sent message key before any browser acc
   assert.equal(result.deduplicated, true);
 });
 
-function fakeCdp({ login = false, pageUrl = "https://chatgpt.com/c/old", navigationUrl, spaUrls = [] } = {}) {
+function fakeCdp({ login = false, pageUrl = "https://chatgpt.com/c/old", navigationUrl, spaUrls = [], targets } = {}) {
   const calls = [];
   const pendingSpaUrls = [...spaUrls];
-  let href = pageUrl;
+  const targetInfos = targets ?? [{ targetId: "chat", type: "page", url: pageUrl }];
+  const targetUrls = new Map(targetInfos.map((target) => [target.targetId, target.url]));
+  let activeTargetId = targetInfos[0]?.targetId ?? null;
+  let href = activeTargetId ? targetUrls.get(activeTargetId) : pageUrl;
   let navigated = false;
   const cdp = {
     async open() { calls.push(["open"]); },
     close() {},
     async send(method, params = {}, sessionId) {
       calls.push([method, params, sessionId]);
-      if (method === "Target.getTargets") return { targetInfos: [{ targetId: "chat", type: "page", url: href }] };
-      if (method === "Target.attachToTarget") return { sessionId: "session" };
+      if (method === "Target.getTargets") return { targetInfos: targetInfos.map((target) => ({ ...target, url: targetUrls.get(target.targetId) })) };
+      if (method === "Target.createTarget") {
+        const targetId = `created-${targetInfos.length + 1}`;
+        targetInfos.push({ targetId, type: "page", url: params.url });
+        targetUrls.set(targetId, params.url);
+        activeTargetId = targetId;
+        href = params.url;
+        return { targetId };
+      }
+      if (method === "Target.attachToTarget") {
+        activeTargetId = params.targetId;
+        href = targetUrls.get(activeTargetId);
+        return { sessionId: "session" };
+      }
       if (method === "Browser.getWindowForTarget") return { windowId: 1 };
       if (method === "Page.navigate") {
         navigated = true;
         href = navigationUrl || params.url;
+        targetUrls.set(activeTargetId, href);
       }
       if (method === "Runtime.evaluate") {
         if (params.expression.includes("authRequired")) {
-          if (navigated && pendingSpaUrls.length) href = pendingSpaUrls.shift();
+          if (navigated && pendingSpaUrls.length) {
+            href = pendingSpaUrls.shift();
+            targetUrls.set(activeTargetId, href);
+          }
           return { result: { value: { href: login ? "https://chatgpt.com/auth/login" : href, authRequired: login } } };
         }
         if (params.expression.includes("composer_not_found")) return { result: { value: { ok: true, href } } };
@@ -178,6 +197,32 @@ test("Bridge test marks ready only after bound composer check and never sends", 
   assert.ok(!fake.calls.some(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("button.click")));
 });
 
+test("Bridge test prefers the bound conversation target among multiple ChatGPT pages", async () => {
+  const fake = fakeCdp({
+    targets: [
+      { targetId: "home", type: "page", url: "https://chatgpt.com/" },
+      { targetId: "other", type: "page", url: "https://chatgpt.com/c/other" },
+      { targetId: "bound", type: "page", url: "https://chatgpt.com/c/bound?model=selected#latest" },
+    ],
+  });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.testBridge();
+  assert.equal(result.state, "ready");
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "bound"));
+  assert.ok(!fake.calls.some(([method]) => method === "Page.navigate"));
+});
+
+test("Bridge test creates the bound conversation target when no ChatGPT page exists", async () => {
+  const fake = fakeCdp({ targets: [] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.testBridge();
+  assert.equal(result.state, "ready");
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.createTarget" && params.url === "https://chatgpt.com/c/bound"));
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "created-1"));
+});
+
 test("Bridge test accepts an already-open bound pathname when ChatGPT changes query and hash", async () => {
   const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/bound?model=auto#answer" });
   const controller = fakeController(fake, "https://chatgpt.com/c/bound?model=some-model");
@@ -192,6 +237,10 @@ test("Bridge test accepts an already-open bound pathname when ChatGPT changes qu
 test("Bridge test waits for SPA navigation to settle on the bound pathname", async () => {
   const fake = fakeCdp({
     pageUrl: "https://chatgpt.com/c/other",
+    targets: [
+      { targetId: "home", type: "page", url: "https://chatgpt.com/" },
+      { targetId: "other", type: "page", url: "https://chatgpt.com/c/other" },
+    ],
     navigationUrl: "https://chatgpt.com/c/loading",
     spaUrls: ["https://chatgpt.com/c/loading?phase=1", "https://chatgpt.com/c/bound?model=normalized#latest"],
   });
@@ -207,19 +256,27 @@ test("Bridge test waits for SPA navigation to settle on the bound pathname", asy
 test("Bridge conversation identity ignores query/hash but rejects different paths and non-HTTPS URLs", () => {
   assert.equal(sameChatUrl("https://chatgpt.com/c/bound?model=one#latest", "https://chatgpt.com/c/bound?model=two"), true);
   assert.equal(sameChatUrl("https://chatgpt.com/c/bound/", "https://chatgpt.com/c/bound"), true);
+  assert.equal(sameChatUrl("https://chatgpt.com/", "https://chatgpt.com/c/bound"), false);
   assert.equal(sameChatUrl("https://chatgpt.com/c/other", "https://chatgpt.com/c/bound"), false);
   assert.equal(sameChatUrl("http://chatgpt.com/c/bound", "https://chatgpt.com/c/bound"), false);
 });
 
 test("Bridge test rejects a genuinely different pathname without reaching ready", async () => {
-  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/other", navigationUrl: "https://chatgpt.com/c/other" });
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/other", navigationUrl: "https://chatgpt.com/c/other?access_token=must-not-appear#secret" });
   const controller = fakeController(fake);
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
   const originalNow = Date.now;
   let now = 0;
   Date.now = () => { now += 25_000; return now; };
   try {
-    await assert.rejects(controller.testBridge(), /绑定的 ChatGPT 对话无法访问/u);
+    await assert.rejects(controller.testBridge(), (error) => {
+      assert.match(error.message, /绑定的 ChatGPT 对话无法访问。/u);
+      assert.match(error.message, /期望：https:\/\/chatgpt\.com\/c\/bound/u);
+      assert.match(error.message, /实际：https:\/\/chatgpt\.com\/c\/other/u);
+      assert.equal(error.message.includes("must-not-appear"), false);
+      assert.equal(error.message.includes("secret"), false);
+      return true;
+    });
     assert.equal(controller.status().state, "error");
   } finally {
     Date.now = originalNow;

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.5 — Chat Bridge Conversation Targeting
+
+- 修复多个 ChatGPT 页面同时打开时，`testBridge` 可能绑定到错误 target 的问题。
+- 优先选择已绑定的 conversation target；绑定失败时提供安全的 expected/actual URL 诊断。
+
 ## 0.7.4 — Chat Bridge Host Remote 修复
 
 - 注册 `openBridgeBrowser` 和 `testBridge` 为 Host Remote methods，修复 Harness UI 调用时返回 `gateway/internal`。
