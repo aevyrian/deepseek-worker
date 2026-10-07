@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 import {
   ChatBridgeController,
@@ -170,6 +171,7 @@ function fakeCdp({
         targetUrls.set(activeTargetId, href);
       }
       if (method === "Runtime.evaluate") {
+        new Function(params.expression);
         if (runtimeError) throw new Error(runtimeError);
         if (pendingRuntimeErrors.length) throw new Error(pendingRuntimeErrors.shift());
         if (scriptException) return { exceptionDetails: { text: "untrusted page exception text" } };
@@ -221,6 +223,30 @@ test("Bridge test marks ready only after bound composer check and never sends", 
   assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/bound"));
   assert.ok(!fake.calls.some(([method]) => method === "Input.insertText" || method === "Input.dispatchKeyEvent"));
   assert.ok(!fake.calls.some(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("button.click")));
+  const expressions = fake.calls.filter(([method]) => method === "Runtime.evaluate").map(([, params]) => params.expression);
+  assert.ok(expressions.some((expression) => expression.includes("readyState")), "page probe must run");
+  assert.ok(expressions.some((expression) => expression.includes("authRequired")), "login state script must run");
+  assert.ok(expressions.some((expression) => expression.includes("composer_not_found")), "composer check must run");
+  for (const expression of expressions) assert.doesNotThrow(() => new Function(expression));
+});
+
+test("Generated login-state script recognizes auth paths and their subpaths without regex escaping", async () => {
+  const fake = fakeCdp();
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.testBridge();
+  assert.equal(result.state, "ready");
+  const expression = fake.calls.find(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("authRequired"))[1].expression;
+  assert.doesNotMatch(expression, /\/\/auth\//u);
+  const evaluateAuth = (pathname) => runInNewContext(expression, {
+    location: { href: `https://chatgpt.com${pathname}`, pathname },
+    document: { body: { innerText: "" }, querySelectorAll: () => [] },
+  }).authRequired;
+  for (const path of ["/auth/login", "/auth/signin", "/auth/sign-up", "/auth/signup"]) {
+    assert.equal(evaluateAuth(path), true, `${path} should require login`);
+    assert.equal(evaluateAuth(`${path}/continue`), true, `${path}/continue should require login`);
+  }
+  assert.equal(evaluateAuth("/c/conversation-id"), false);
 });
 
 test("Bridge test prefers the bound conversation target among multiple ChatGPT pages", async () => {

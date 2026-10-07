@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.7 — Chat Bridge Page Script Fix
+
+- 修复 `loginStateScript` 中的正则在模板字符串生成后成为非法 JavaScript、导致 `Runtime.evaluate` 返回 `page-script-exception` 的问题。
+- 登录路径检测改为 pathname 前缀判断；fake Runtime.evaluate 测试新增真实 JavaScript 语法编译检查。
+
 ## 0.7.6 — Chat Bridge Runtime Diagnostics
 
 - 改进 Chat Bridge `testBridge` 运行态诊断，不再将 `Runtime.evaluate` 失败误报为 conversation 无法访问。
