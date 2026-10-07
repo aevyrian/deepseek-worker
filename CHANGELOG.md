@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.8 — Chat Bridge Composer Wait
+
+- Chat Bridge readiness checks now wait for the SPA-rendered composer within a bounded deadline. `testBridge` and `sendMessage` share the same wait path and report conversation changes or login transitions while waiting.
+
 ## 0.7.7 — Chat Bridge Page Script Fix
 
 - 修复 `loginStateScript` 中的正则在模板字符串生成后成为非法 JavaScript、导致 `Runtime.evaluate` 返回 `page-script-exception` 的问题。

@@ -126,6 +126,10 @@ function fakeCdp({
   spaUrls = [],
   targets,
   composerAvailable = true,
+  composerSequence = [],
+  composerHrefSequence = [],
+  loginAfterComposerChecks = Number.POSITIVE_INFINITY,
+  onComposerCheck,
   runtimeErrors = [],
   runtimeError,
   scriptException = false,
@@ -133,11 +137,15 @@ function fakeCdp({
   const calls = [];
   const pendingSpaUrls = [...spaUrls];
   const pendingRuntimeErrors = [...runtimeErrors];
+  const pendingComposerSequence = [...composerSequence];
+  const pendingComposerHrefSequence = [...composerHrefSequence];
   const targetInfos = targets ?? [{ targetId: "chat", type: "page", url: pageUrl }];
   const targetUrls = new Map(targetInfos.map((target) => [target.targetId, target.url]));
   let activeTargetId = targetInfos[0]?.targetId ?? null;
   let href = activeTargetId ? targetUrls.get(activeTargetId) : pageUrl;
   let navigated = false;
+  let composerChecks = 0;
+  let messageInserted = false;
   const cdp = {
     async open() { calls.push(["open"]); },
     close() {},
@@ -183,12 +191,24 @@ function fakeCdp({
             href = pendingSpaUrls.shift();
             targetUrls.set(activeTargetId, href);
           }
-          return { result: { value: { href: login ? "https://chatgpt.com/auth/login" : href, authRequired: login } } };
+          const authRequired = login || composerChecks >= loginAfterComposerChecks;
+          return { result: { value: { href: authRequired ? "https://chatgpt.com/auth/login" : href, authRequired } } };
         }
         if (params.expression.includes("composer_not_found")) {
-          return { result: { value: { ok: composerAvailable, reason: composerAvailable ? undefined : "composer_not_found", href } } };
+          composerChecks += 1;
+          onComposerCheck?.(composerChecks);
+          const nextHref = pendingComposerHrefSequence.shift();
+          if (nextHref) {
+            href = nextHref;
+            targetUrls.set(activeTargetId, href);
+          }
+          const available = pendingComposerSequence.length ? pendingComposerSequence.shift() : composerAvailable;
+          return { result: { value: { ok: available, reason: available ? undefined : "composer_not_found", href } } };
         }
+        if (params.expression.includes("PROJECT_ID: ")) return { result: { value: messageInserted } };
+        if (params.expression.includes("button.click()")) return { result: { value: true } };
       }
+      if (method === "Input.insertText") messageInserted = true;
       return {};
     },
   };
@@ -228,6 +248,64 @@ test("Bridge test marks ready only after bound composer check and never sends", 
   assert.ok(expressions.some((expression) => expression.includes("authRequired")), "login state script must run");
   assert.ok(expressions.some((expression) => expression.includes("composer_not_found")), "composer check must run");
   for (const expression of expressions) assert.doesNotThrow(() => new Function(expression));
+});
+
+test("Bridge test waits for a composer rendered after initial checks", async () => {
+  const fake = fakeCdp({ composerSequence: [false, false, true] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.testBridge();
+  assert.equal(result.state, "ready");
+  const composerChecks = fake.calls.filter(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("composer_not_found"));
+  assert.equal(composerChecks.length, 3);
+});
+
+test("Bridge test reports composer unavailable only after its wait deadline", async () => {
+  const originalNow = Date.now;
+  let fakeNow = originalNow();
+  Date.now = () => fakeNow;
+  try {
+    const fake = fakeCdp({
+      composerAvailable: false,
+      onComposerCheck: () => { fakeNow += 30_000; },
+    });
+    const controller = fakeController(fake);
+    controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+    await assert.rejects(controller.testBridge(), (error) => error.code === "bridge_composer_unavailable");
+    assert.equal(fake.calls.filter(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("composer_not_found")).length, 1);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("Bridge composer wait reports a changed conversation URL", async () => {
+  const fake = fakeCdp({
+    composerAvailable: false,
+    composerSequence: [false, false],
+    composerHrefSequence: [null, "https://chatgpt.com/c/other"],
+  });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.testBridge(), (error) => error.code === "bridge_conversation_unreachable");
+});
+
+test("Bridge composer wait reports a login transition", async () => {
+  const fake = fakeCdp({ composerAvailable: false, loginAfterComposerChecks: 1 });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.testBridge(), (error) => error.code === "bridge_login_required");
+  assert.equal(controller.status().state, "needs-login");
+});
+
+test("sendMessage uses the shared bounded composer wait helper", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/bound", composerSequence: [false, false, true] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope(ENVELOPE);
+  assert.equal(result.ok, true);
+  assert.equal(result.deduplicated, false);
+  assert.equal(fake.calls.filter(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("composer_not_found")).length, 3);
+  assert.ok(fake.calls.some(([method]) => method === "Input.insertText"));
 });
 
 test("Generated login-state script recognizes auth paths and their subpaths without regex escaping", async () => {
@@ -306,13 +384,6 @@ test("Bridge test reports page script exceptions separately from CDP evaluation 
     assert.doesNotMatch(error.message, /untrusted page exception text/u);
     return true;
   });
-});
-
-test("Bridge test distinguishes a valid conversation without a composer", async () => {
-  const fake = fakeCdp({ composerAvailable: false });
-  const controller = fakeController(fake);
-  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
-  await assert.rejects(controller.testBridge(), (error) => error.code === "bridge_composer_unavailable");
 });
 
 test("Bridge test accepts an already-open bound pathname when ChatGPT changes query and hash", async () => {
