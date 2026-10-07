@@ -78,11 +78,19 @@ test("Public Bridge status never returns the bound chat URL", () => {
   assert.ok(!JSON.stringify(state).includes("private-chat-id"));
 });
 
-test("Bridge readiness requires local enablement and a bound chat", () => {
-  assert.equal(bridgeReady({ bridgeBrowser: "online" }, {
+test("Bridge readiness preserves the wake advertisement contract across bridge states", () => {
+  const config = {
     chatBridgeEnabled: true,
     chatBridgeChatUrl: "https://chatgpt.com/c/abc",
-  }), true);
+  };
+  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "idle" }, config), true);
+  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "sent" }, config), true);
+  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "ready" }, config), true);
+  assert.equal(bridgeReady({ bridgeBrowser: "unavailable", bridgeState: "error" }, config), false);
+  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "ready" }, {
+    chatBridgeEnabled: true,
+    chatBridgeChatUrl: "",
+  }), false);
   assert.equal(bridgeReady({ bridgeBrowser: "online" }, {
     chatBridgeEnabled: true,
     chatBridgeChatUrl: "",
@@ -107,6 +115,65 @@ test("Controller deduplicates an already-sent message key before any browser acc
   const result = await controller.sendEnvelope(ENVELOPE);
   assert.equal(result.ok, true);
   assert.equal(result.deduplicated, true);
+});
+
+function fakeCdp({ login = false } = {}) {
+  const calls = [];
+  const cdp = {
+    async open() { calls.push(["open"]); },
+    close() {},
+    async send(method, params = {}, sessionId) {
+      calls.push([method, params, sessionId]);
+      if (method === "Target.getTargets") return { targetInfos: [{ targetId: "chat", type: "page", url: "https://chatgpt.com/c/old" }] };
+      if (method === "Target.attachToTarget") return { sessionId: "session" };
+      if (method === "Browser.getWindowForTarget") return { windowId: 1 };
+      if (method === "Runtime.evaluate") {
+        if (params.expression.includes("authRequired")) return { result: { value: { href: login ? "https://chatgpt.com/auth/login" : "https://chatgpt.com/c/bound", authRequired: login } } };
+        if (params.expression.includes("composer_not_found")) return { result: { value: { ok: true, href: "https://chatgpt.com/c/bound" } } };
+      }
+      return {};
+    },
+  };
+  return { cdp, calls };
+}
+
+function fakeController(fake) {
+  return new ChatBridgeController({
+    runtime: {},
+    getConfig: () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: "https://chatgpt.com/c/bound", chatBridgeDebugPort: 9223 }),
+    cdpFactory: () => fake.cdp,
+  });
+}
+
+test("Open/Login activates and restores an existing ChatGPT browser page", async () => {
+  const fake = fakeCdp();
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await controller.openLoginBrowser();
+  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/"));
+  assert.ok(fake.calls.some(([method]) => method === "Browser.setWindowBounds"));
+  assert.ok(fake.calls.some(([method]) => method === "Target.activateTarget"));
+});
+
+test("Bridge test marks ready only after bound composer check and never sends", async () => {
+  const fake = fakeCdp();
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.testBridge();
+  assert.equal(result.ok, true);
+  assert.equal(result.state, "ready");
+  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/bound"));
+  assert.ok(!fake.calls.some(([method]) => method === "Input.insertText" || method === "Input.dispatchKeyEvent"));
+  assert.ok(!fake.calls.some(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("button.click")));
+});
+
+test("Bridge test explicitly reports login required and never reports ready", async () => {
+  const fake = fakeCdp({ login: true });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.testBridge(), (error) => error.code === "bridge_login_required");
+  assert.equal(controller.status().state, "needs-login");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.insertText" || method === "Input.dispatchKeyEvent"));
 });
 
 test("pre-send visibility probe requires the complete project/task/message identity", () => {

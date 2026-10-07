@@ -634,10 +634,15 @@ export class WorkerControlService extends TypertRemoteService {
     if (!config.chatBridgeEnabled) return { ok: false, code: "bridge_disabled", ...state };
     if (!config.chatBridgeChatUrl) return { ok: false, code: "bridge_unbound", ...state };
     try {
-      await this.bridge.ensureBrowser({ openHome: false });
-      return { ok: true, ...this.bridge.status() };
+      return await this.bridge.testBridge();
     } catch (error) {
-      return { ok: false, code: "bridge_browser_failed", message: redactSecret(error), ...this.bridge.status() };
+      return {
+        ok: false,
+        code: error?.code === "bridge_login_required" ? "bridge_login_required" : "bridge_browser_failed",
+        message: redactSecret(error),
+        state: error?.code === "bridge_login_required" ? "needs-login" : this.bridge.status().state,
+        ...this.bridge.status(),
+      };
     }
   }
 

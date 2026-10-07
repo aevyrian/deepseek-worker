@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.2 — Chat Bridge Browser Interaction
+
+- Opening the Chat Bridge sign-in browser now activates an existing ChatGPT tab or creates one, restores its window, and brings it forward.
+- Bridge testing now checks the configured conversation, recognizes a required ChatGPT login, and confirms the composer without sending a message.
+- Preserves the prior bridge availability signal used by Worker registration and heartbeat after successful wake delivery.
+
 ## 0.7.1 — Production v13 Chat Bridge Compatibility
 
 - 在 Cloud terminal result/failure 成功响应未包含正式 `bridge_delivery` 时，启用 Chat Bridge 创建本地 durable wake outbox 记录，并以 project/task/terminal state 确定性生成 message key。
