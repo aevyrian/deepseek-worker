@@ -134,7 +134,7 @@ globalThis.fetch = async (url, init = {}) => {
     }
     assert.equal(init.headers.authorization, undefined);
     assert.match(body.token_hash, /^[0-9a-f]{64}$/);
-    assert.equal(body.client_version, "0.7.3");
+    assert.equal(body.client_version, "0.7.4");
     assert.deepEqual(body.workspace_allowlist, ["workspace-a"]);
     return new Response(JSON.stringify({
       state: "pending",
@@ -198,15 +198,35 @@ try {
   assert.equal(service.typertRemote.serviceKey, "deepseekWorkerConnectorControl");
   assert.equal(service.typertRemote.namespace, "deepseekWorkerConnector");
 
-  for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"]) {
+  for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "openBridgeBrowser", "testBridge"]) {
     const found = gatewayDiscover(ctx, "deepseekWorkerConnector", method);
     assert.equal(found.serviceKey, "deepseekWorkerConnectorControl");
     assert.equal(found.receiver, service);
   }
 
+  let openBridgeCalls = 0;
+  service.bridge.openLoginBrowser = async () => {
+    openBridgeCalls += 1;
+    return { opened: true };
+  };
+  const openedBridge = await gatewayInvoke(ctx, "deepseekWorkerConnector", "openBridgeBrowser");
+  assert.deepEqual(openedBridge, { ok: true, opened: true });
+  assert.equal(openBridgeCalls, 1);
+
+  service.input.chatBridgeEnabled = true;
+  service.input.chatBridgeChatUrl = "https://chatgpt.com/c/bridge-test";
+  let testBridgeCalls = 0;
+  service.bridge.testBridge = async () => {
+    testBridgeCalls += 1;
+    return { ok: true, state: "ready" };
+  };
+  const testedBridge = await gatewayInvoke(ctx, "deepseekWorkerConnector", "testBridge");
+  assert.deepEqual(testedBridge, { ok: true, state: "ready" });
+  assert.equal(testBridgeCalls, 1);
+
   const status = await gatewayInvoke(ctx, "deepseekWorkerConnector", "status");
   assert.equal(status.execution, "native");
-  assert.equal(status.currentVersion, "0.7.3");
+  assert.equal(status.currentVersion, "0.7.4");
   assert.equal(status.updateState, "idle");
 
   const generated = await gatewayInvoke(ctx, "deepseekWorkerConnector", "generateToken");

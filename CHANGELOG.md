@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.4 — Chat Bridge Host Remote 修复
+
+- 注册 `openBridgeBrowser` 和 `testBridge` 为 Host Remote methods，修复 Harness UI 调用时返回 `gateway/internal`。
+
 ## 0.7.3 — Chat Bridge Reliability
 
 - Bridge Test accepts the bound ChatGPT conversation across query/hash changes and SPA navigation while still requiring the exact conversation pathname and composer, without sending a message.

@@ -732,7 +732,7 @@ function markRemoteMethod(prototype, methodName) {
   for (const initializer of initializers) initializer.call(receiver);
 }
 
-for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"]) {
+for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "openBridgeBrowser", "testBridge"]) {
   markRemoteMethod(WorkerControlService.prototype, method);
 }
 
