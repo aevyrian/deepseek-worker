@@ -1,24 +1,55 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   CONNECTOR_PACKAGE,
   CONNECTOR_VERSION,
   TRUSTED_SOURCE,
   UPDATE_CHECK_INTERVAL_MS,
   buildInstallSpec,
+  classifyInstallSource,
   compareSemver,
   createUpdateRuntime,
+  installedSourceError,
   isNewerVersion,
   isTrustedSource,
+  officialMigrationGuidance,
   parseSemver,
   performUpdateCheck,
   performUpdateInstall,
   publicUpdateStatus,
+  readRecordedInstallSpec,
+  resolveInstalledSourceEvidence,
   resolveUpdateCandidate,
   selectUpdateCandidate,
   validateUpdateManifest,
 } from "../lib/update.mjs";
+
+const temporaryProfileDirs = [];
+
+after(async () => {
+  await Promise.all(temporaryProfileDirs.map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+/**
+ * Build a real profile directory whose package.json records one install spec, so tests exercise the
+ * same file-reading path production uses instead of stubbing the reader.
+ * @param spec Recorded dependency spec, or null to record no entry at all.
+ * @returns Harness-like profile context.
+ */
+async function recordedProfileContext(spec) {
+  const dir = await mkdtemp(join(tmpdir(), "dsh-connector-profile-"));
+  temporaryProfileDirs.push(dir);
+  const manifest = { name: "dsh-profile-test", private: true, dependencies: {} };
+  if (typeof spec === "string") manifest.dependencies[CONNECTOR_PACKAGE] = spec;
+  await writeFile(join(dir, "package.json"), JSON.stringify(manifest, null, 2), "utf8");
+  return Object.freeze({ name: "test", dir, installAnchor: join(dir, "package.json") });
+}
+
+// The trusted GitHub form the Harness Plugin Manager records after one official install.
+const TRUSTED_PROFILE = await recordedProfileContext("github:aevyrian/deepseek-worker");
 
 function response(body, status = 200) {
   return new Response(body === null ? "" : JSON.stringify(body), {
@@ -75,8 +106,20 @@ function githubFallback({ releases = [], tags = [] } = {}) {
   };
 }
 
+/**
+ * Fake Harness Plugin Manager.
+ *
+ * The bundle record deliberately mirrors the real `BundleInfo` shape that
+ * `@deepseek-ai/dsh-plugin-manager` returns from `listBundles()`: name, version, enabled, installed,
+ * optional, removable, rows and overrides. Real Harness does NOT publish a `source` field, so this
+ * double must not invent one; the install source is read from the profile manifest instead.
+ * `bundleSource` exists only to simulate a future Harness that starts reporting one.
+ */
 function pluginManager({
-  source = `${TRUSTED_SOURCE}#v0.4.8`,
+  bundleSource,
+  bundleInstalled = true,
+  profile,
+  bundles,
   result = {
     changed: true,
     application: "restart-required",
@@ -88,13 +131,19 @@ function pluginManager({
   onInstall,
 } = {}) {
   return {
+    ...(profile ? { profile } : {}),
     async listBundles() {
+      if (Array.isArray(bundles)) return bundles;
       return [{
         name: CONNECTOR_PACKAGE,
         version: CONNECTOR_VERSION,
-        installed: true,
         enabled: true,
-        source,
+        installed: bundleInstalled,
+        optional: false,
+        removable: true,
+        rows: [],
+        overrides: [],
+        ...(bundleSource === undefined ? {} : { source: bundleSource }),
       }];
     },
     async installBundle(spec, options) {
@@ -118,12 +167,14 @@ test("update status distinguishes running and installed versions", () => {
   assert.deepEqual(publicUpdateStatus(runtime), {
     currentVersion: "0.3.3-preview.6",
     installedVersion: "0.4.8",
+    installedSource: null,
     latestVersion: "0.4.8",
     updateState: "restart-required",
     updateSource: null,
     lastCheckedAt: null,
     restartRequired: true,
     lastUpdateError: null,
+    lastUpdateErrorCode: null,
   });
 });
 
@@ -187,6 +238,33 @@ test("trusted installed Git source forms are accepted but arbitrary hosts are no
   assert.equal(isTrustedSource("github:aevyrian/deepseek-worker#v0.3.1"), true);
   assert.equal(isTrustedSource("git+https://github.com/aevyrian/deepseek-worker.git#v0.3.1"), true);
   assert.equal(isTrustedSource("https://example.com/aevyrian/deepseek-worker.git"), false);
+});
+
+test("official profile install evidence accepts Harness git spec spellings and hides untrusted values", async () => {
+  for (const spec of [
+    "github:aevyrian/deepseek-worker#v0.7.11",
+    "git+https://github.com/aevyrian/deepseek-worker.git#v0.7.11",
+    "https://github.com/aevyrian/deepseek-worker.git#0123456789abcdef0123456789abcdef01234567",
+  ]) {
+    const evidence = await resolveInstalledSourceEvidence({ profileContext: await recordedProfileContext(spec) });
+    assert.equal(evidence.status, "trusted", spec);
+    assert.equal(evidence.display, `GitHub ${"aevyrian/deepseek-worker"}`);
+  }
+
+  const untrusted = await resolveInstalledSourceEvidence({
+    profileContext: await recordedProfileContext("https://user:secret@example.com/private/repo.git"),
+  });
+  assert.equal(untrusted.status, "untrusted");
+  assert.equal(untrusted.spec, null);
+  assert.equal(untrusted.display, "Unrecognized source");
+  assert.doesNotMatch(installedSourceError(untrusted, "0.7.12").message, /secret|example\.com/);
+});
+
+test("missing install source gives a one-time official Plugin Manager migration instruction", () => {
+  const error = installedSourceError({ status: "absent" }, "0.7.12");
+  assert.equal(error.code, "installed-source-unknown");
+  assert.match(error.message, /Harness 官方 Plugin Manager/);
+  assert.match(error.message, /https:\/\/github\.com\/aevyrian\/deepseek-worker\.git#v0\.7\.12/);
 });
 
 test("manifest source cannot carry its own branch or ref", () => {
@@ -298,22 +376,21 @@ test("minimum Harness version rejects an incompatible runtime before install", a
   assert.equal(installCalls, 0);
 });
 
-test("untrusted installed package source is refused before replacement", async () => {
+test("untrusted recorded install source is refused before replacement", async () => {
   let installCalls = 0;
   const runtime = createUpdateRuntime();
   const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
-    pluginManager: pluginManager({
-      source: "file:C:/random/deepseek-worker",
-      onInstall: () => { installCalls += 1; },
-    }),
+    pluginManager: pluginManager({ onInstall: () => { installCalls += 1; } }),
     harnessVersion: "1.0.0",
+    profileContext: await recordedProfileContext("file:C:/random/deepseek-worker"),
     fetchImpl: cloudOnly(manifest("0.8.0")),
   });
   assert.equal(status.updateState, "failed");
   assert.match(status.lastUpdateError, /GitHub 安装源/);
-  assert.equal(installCalls, 0);
+  assert.equal(status.lastUpdateErrorCode, "installed-source-untrusted");
+  assert.equal(installCalls, 0, "an untrusted recorded source must never be overwritten");
 });
 
 test("correct Git tag update uses official installBundle with enabled false", async () => {
@@ -326,6 +403,7 @@ test("correct Git tag update uses official installBundle with enabled false", as
       onInstall: (spec, options) => calls.push({ spec, options }),
     }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
   });
 
@@ -338,6 +416,33 @@ test("correct Git tag update uses official installBundle with enabled false", as
   }]);
 });
 
+test("official Plugin Manager profile property supports sequential trusted updates", async () => {
+  const calls = [];
+  const runtime = createUpdateRuntime();
+  const manager = pluginManager({
+    profile: TRUSTED_PROFILE,
+    result: { changed: true, application: "restart-required", bundle: CONNECTOR_PACKAGE },
+    onInstall: (spec, options) => calls.push({ spec, options }),
+  });
+  for (const version of ["0.8.0", "0.9.0"]) {
+    const status = await performUpdateInstall({
+      runtime,
+      config: { autoUpdate: true, updateChannel: "stable" },
+      pluginManager: manager,
+      harnessVersion: "1.0.0",
+      fetchImpl: cloudOnly(manifest(version)),
+    });
+    assert.equal(status.updateState, "restart-required");
+    assert.equal(status.installedSource, "GitHub aevyrian/deepseek-worker");
+    // A successful Plugin Manager result requires an application restart before another update.
+    // Resetting this flag models that restart without touching a real Harness instance.
+    runtime.restartRequired = false;
+  }
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((call) => call.spec.startsWith(`${TRUSTED_SOURCE}#`)));
+  assert.ok(calls.every((call) => call.options.enabled === false));
+});
+
 test("package metadata mismatch is rejected before Plugin Manager replacement", async () => {
   let installCalls = 0;
   const runtime = createUpdateRuntime();
@@ -346,6 +451,7 @@ test("package metadata mismatch is rejected before Plugin Manager replacement", 
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ onInstall: () => { installCalls += 1; } }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0"), { packageVersion: "9.9.9" }),
   });
   assert.equal(status.updateState, "failed");
@@ -365,6 +471,7 @@ test("worker busy state becomes waiting-idle and update starts only after task c
       onInstall: () => { installedWhileBusy = busy; },
     }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
     isWorkerBusy: () => busy,
     sleepImpl: async () => {
@@ -393,6 +500,7 @@ test("Plugin Manager update failure keeps the current Connector runtime usable",
       },
     }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
   });
   assert.equal(status.currentVersion, CONNECTOR_VERSION);
@@ -416,6 +524,7 @@ test("bundle validation failure leaves the running Connector on the current vers
       },
     }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
   });
   assert.equal(status.currentVersion, CONNECTOR_VERSION);
@@ -438,6 +547,7 @@ test("official incompatibility result is surfaced without replacing runtime stat
       },
     }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
   });
   assert.equal(status.updateState, "failed");
@@ -456,13 +566,13 @@ test("manual update check remains available when auto-update is disabled and nev
     fetchImpl: async (url) => String(url).endsWith("/api/connector/latest")
       ? response(manifest("0.6.0"))
       : String(url).includes("/releases?")
-        ? response([{ tag_name: "v0.7.12", draft: false, prerelease: false }])
-        : String(url).includes("/tags?")
-          ? response([{ name: "v0.7.12" }])
+      ? response([{ tag_name: "v0.7.13", draft: false, prerelease: false }])
+      : String(url).includes("/tags?")
+        ? response([{ name: "v0.7.13" }])
           : response(null, 404),
   });
   assert.equal(status.updateState, "available");
-  assert.equal(status.latestVersion, "0.7.12");
+  assert.equal(status.latestVersion, "0.7.13");
   assert.equal(status.updateSource, "github-releases");
   assert.ok(status.lastCheckedAt);
   assert.equal(packageCalls, 0, "checking updates must not call the Plugin Manager");
@@ -486,6 +596,7 @@ test("forced update queries GitHub and reinstalls the same stable version throug
     config: { autoUpdate: false, updateChannel: "stable" },
     pluginManager: pluginManager({ result: { application: "restart-required", bundle: CONNECTOR_PACKAGE, version: CONNECTOR_VERSION }, onInstall: (spec, options) => calls.push({ spec, options }) }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl,
     forceReinstall: true,
   });
@@ -514,6 +625,7 @@ test("update logic never mutates Credentials, pairing identity, Worker ID or Wor
     config,
     pluginManager: pluginManager(),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
   });
 
@@ -539,6 +651,7 @@ test("maintenance gate stays closed after install and reopens after a confirmed 
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ onInstall: () => assert.equal(draining, true) }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
     enterMaintenance,
     leaveMaintenance,
@@ -553,6 +666,7 @@ test("maintenance gate stays closed after install and reopens after a confirmed 
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ result: { changed: false, application: "failed", error: { code: "disk-full" } } }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
     enterMaintenance: async () => { failureDrain = true; },
     leaveMaintenance: () => { failureDrain = false; },
@@ -569,6 +683,7 @@ test("ambiguous install and updater cancellation fail closed or safely release m
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ result: { changed: true, application: "failed", error: { code: "host-error" } } }),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
     enterMaintenance: async () => { ambiguousDrain = true; },
     leaveMaintenance: () => { ambiguousDrain = false; },
@@ -586,6 +701,7 @@ test("ambiguous install and updater cancellation fail closed or safely release m
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager(),
     harnessVersion: "1.0.0",
+    profileContext: TRUSTED_PROFILE,
     fetchImpl: cloudOnly(manifest("0.8.0")),
     signal: controller.signal,
     isWorkerBusy: () => true,

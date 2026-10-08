@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.12 — Trusted Self-Update Source Recovery
+
+- Read the installed Git source from the active profile held by the official Harness Plugin Manager; `listBundles()` does not expose a source field.
+- Accept supported GitHub dependency-spec spellings only for the exact `aevyrian/deepseek-worker` repository, while continuing to reject local, registry, fork, tarball, and unknown sources.
+- Give older installs with missing or untrusted source metadata a one-time official Plugin Manager migration instruction; do not expose raw untrusted URLs in status or errors.
+- Preserve exact tag-to-commit and package verification, Worker Drain, and the official Plugin Manager install path.
+- Add regression coverage for legacy and current Git specs, fail-closed migration, the actual profile property, and consecutive upgrades after restart.
+
 ## 0.7.11 — Durable Chat Bridge Recovery
 
 - Reconcile uncertain deliveries on a persisted exponential schedule, with a durable short lease to prevent concurrent checks and bounded manual-review reporting.

@@ -49,6 +49,7 @@ import {
   createUpdateRuntime,
   isNewerVersion,
   publicUpdateStatus,
+  resolveInstalledSourceEvidence,
 } from "./lib/update.mjs";
 
 export const name = "deepseek-worker-connector";
@@ -104,6 +105,12 @@ async function syncInstalledConnectorVersion(runtime, pluginManager) {
     const installed = Array.isArray(bundles)
       ? bundles.find((bundle) => bundle?.name === "deepseek-worker-connector")
       : undefined;
+    try {
+      const evidence = await resolveInstalledSourceEvidence({ bundle: installed, profileContext: pluginManager.profile });
+      runtime.installedSource = evidence.display;
+    } catch {
+      runtime.installedSource = null;
+    }
     const installedVersion = typeof installed?.version === "string" && installed.version.trim()
       ? installed.version.trim()
       : null;

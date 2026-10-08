@@ -31,6 +31,14 @@ Normal install.ps1 now sends that Git source through official dsh plugin --profi
 
 A local/file development install is intentionally not auto-overwritten.
 
+### Installed source evidence
+
+Harness `PluginManager.listBundles()` reports bundle identity, version, enabled/installed state, and patch rows; its supported `BundleInfo` contract does not include an install-source field. The official Plugin Manager service retains the active `profile` object. The updater reads the dependency spec for `deepseek-worker-connector` from that profile's `package.json`, which is the manifest the Plugin Manager uses for its own inventory and package operations.
+
+Only Git/GitHub forms resolving to the exact trusted repository are accepted. If the profile has no dependency spec, or it records a registry, local path, tarball, fork, or other unrecognized source, installation fails closed and the UI gives a one-time instruction to install the exact version through the official Harness Plugin Manager. After that installation, future updater calls read the source spec the same Plugin Manager records. Bundle metadata and profile metadata are cross-checked when both are available; conflicting evidence is rejected. Raw untrusted specs are not shown in public status or error text.
+
+This source check identifies the package manager's recorded install source; it is not a cryptographic attestation of a manually edited local profile. The updater still independently verifies the trusted GitHub release/tag, resolves the exact commit, checks package metadata, waits for Worker Drain, and installs only through the official Plugin Manager.
+
 ## Provider chain
 
 Future Cloud manifest:

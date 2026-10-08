@@ -137,6 +137,9 @@ window.__ModuleLoader__.load({
       checkUpdates: "检查更新",
       forceUpdate: "一键强制更新",
       updateSource: "检查来源",
+      installedSource: "安装来源记录",
+      updateSourceRefused: "当前安装记录不是受信任的 GitHub 安装源，已拒绝覆盖。请按下方说明完成一次官方来源迁移。",
+      updateSourceUnknown: "无法确认当前安装来源，已拒绝覆盖。请按下方说明完成一次官方来源迁移。",
       latestVersion: "最新版本",
       lastChecked: "上次检查",
     };
@@ -224,6 +227,9 @@ window.__ModuleLoader__.load({
       checkUpdates: "Check for updates",
       forceUpdate: "Force update now",
       updateSource: "Update source",
+      installedSource: "Recorded install source",
+      updateSourceRefused: "The recorded install source is not the trusted GitHub source, so overwriting was refused. Follow the guidance below to migrate once.",
+      updateSourceUnknown: "The current install source could not be confirmed, so overwriting was refused. Follow the guidance below to migrate once.",
       latestVersion: "Latest version",
       lastChecked: "Last checked",
     };
@@ -798,6 +804,11 @@ window.__ModuleLoader__.load({
                 : updateState === "restart-required" ? t("updateRestart")
                   : updateState === "failed" ? t("updateFailed") : t("updateIdle");
 
+      const updateErrorCode = status?.lastUpdateErrorCode || null;
+      const sourceRefusal = updateErrorCode === "installed-source-untrusted" ? t("updateSourceRefused")
+        : updateErrorCode === "installed-source-unknown" ? t("updateSourceUnknown")
+          : null;
+
       const rawPairingState = pairing?.state || status?.pairing || "unpaired";
       const connectionState = pairingBusy
         ? "connecting"
@@ -998,6 +1009,10 @@ window.__ModuleLoader__.load({
             h("span", null, t("updateSource")),
             h("span", null, status?.updateSource || "--"),
           ),
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("span", null, t("installedSource")),
+            h("span", null, status?.installedSource || "--"),
+          ),
           h("div", { style: rowStyle },
             h(Button, {
               variant: "outline",
@@ -1017,6 +1032,7 @@ window.__ModuleLoader__.load({
             : null,
           updateState === "failed"
             ? h("div", { style: gridStyle },
+                sourceRefusal ? h("p", { role: "status", style: mutedStyle }, sourceRefusal) : null,
                 h("p", { style: mutedStyle }, t("updateFailed")),
                 h(Button, { variant: "outline", onClick: () => void retryUpdate() }, t("retryUpdate")),
               )
