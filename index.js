@@ -25,7 +25,8 @@ import {
 } from "./lib/protocol.mjs";
 import { authorizedWorkspaceState, workspaceHeartbeatPayload } from "./lib/workspaces.mjs";
 import { executeNativeSession } from "./lib/native-session.mjs";
-import { AsyncTaskPool, fillTaskPool } from "./lib/task-pool.mjs";
+import { AsyncTaskPool, fillTaskPool, WorkerClaimGate } from "./lib/task-pool.mjs";
+import { CONNECTOR_BUILD_HASH } from "./lib/build-identity.mjs";
 import { registerOrchestratorPreset } from "./lib/orchestrator-preset.mjs";
 import { migrateLegacyOrchestratorBundles } from "./lib/migration.mjs";
 import { migrateLegacyProfileArtifacts } from "./lib/profile-cleanup.mjs";
@@ -152,6 +153,7 @@ function initialRuntime() {
     approvalUrl: null,
     pairingExpiresAt: null,
     ...createUpdateRuntime(CONNECTOR_VERSION),
+    currentBuildHash: CONNECTOR_BUILD_HASH,
     workerBusy: false,
     activeTaskCount: 0,
     maxConcurrentTasks: 24,
@@ -188,6 +190,20 @@ export class WorkerControlService extends TypertRemoteService {
       bridge: this.bridge,
       enabled: () => currentConfig(this.input).chatBridgeEnabled,
       logger: ctx.logger,
+      acknowledgeDelivery: async (bridgeDelivery) => {
+        const config = currentConfig(this.input);
+        const credentials = currentCredentials(this.ctx);
+        const token = credentials === undefined ? null : await resolveWorkerToken(credentials);
+        if (!token) throw new Error("worker_credentials_unavailable");
+        await workerRequest(config, token, "bridge/ack", { bridge_delivery: bridgeDelivery }, AbortSignal.timeout(10000));
+      },
+      rejectDelivery: async (bridgeDelivery, reason) => {
+        const config = currentConfig(this.input);
+        const credentials = currentCredentials(this.ctx);
+        const token = credentials === undefined ? null : await resolveWorkerToken(credentials);
+        if (!token) throw new Error("worker_credentials_unavailable");
+        await workerRequest(config, token, "bridge/reject", { bridge_delivery: bridgeDelivery, reason }, AbortSignal.timeout(10000));
+      },
     });
     this.wakeCoordinator = new WakeCoordinator({
       outbox: this.bridgeOutbox,
@@ -195,6 +211,7 @@ export class WorkerControlService extends TypertRemoteService {
       enabled: () => currentConfig(this.input).chatBridgeEnabled,
       logger: ctx.logger,
     });
+    this.claimGate = new WorkerClaimGate();
     this.updater = new AutoUpdateController({
       runtime: this.runtime,
       getConfig: () => currentConfig(this.input),
@@ -203,6 +220,8 @@ export class WorkerControlService extends TypertRemoteService {
         try { return getDshRuntimeVersion(); } catch { return ""; }
       },
       isWorkerBusy: () => this.runtime.workerBusy === true,
+      enterMaintenance: () => this.claimGate.drain(),
+      leaveMaintenance: () => this.claimGate.reopen(),
       logger: ctx.logger,
     });
 
@@ -258,7 +277,7 @@ export class WorkerControlService extends TypertRemoteService {
 
     ctx.effect(() => {
       const lifecycle = new AbortController();
-      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal, this.wakeCoordinator).catch((error) => {
+      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal, this.wakeCoordinator, this.claimGate).catch((error) => {
         if (!lifecycle.signal.aborted) {
           ctx.logger.error("deepseek-worker connector stopped: %s", redactSecret(error));
         }
@@ -747,7 +766,7 @@ for (const method of ["status", "generateToken", "test", "beginPairing", "pairin
 
 export default WorkerControlService;
 
-async function runWorker(ctx, input, runtime, signal, wakeCoordinator) {
+async function runWorker(ctx, input, runtime, signal, wakeCoordinator, claimGate) {
   let registeredToken;
   let registeredSignature = "";
   let lastHeartbeatAt = 0;
@@ -767,6 +786,7 @@ async function runWorker(ctx, input, runtime, signal, wakeCoordinator) {
       }
     },
   });
+  claimGate?.setIdleWaiter(() => activeTasks.waitForIdle());
 
   try {
     while (!signal.aborted) {
@@ -852,6 +872,7 @@ async function runWorker(ctx, input, runtime, signal, wakeCoordinator) {
           state: presenceState,
           ...workspacePayload,
           client_version: CONNECTOR_VERSION,
+          client_build_hash: CONNECTOR_BUILD_HASH,
           chat_bridge_ready: bridgeReady(runtime, config),
         }, signal);
         await deliverBridgePayloads(config, registered, wakeCoordinator);
@@ -868,6 +889,7 @@ async function runWorker(ctx, input, runtime, signal, wakeCoordinator) {
           state: presenceState,
           ...workspacePayload,
           client_version: CONNECTOR_VERSION,
+          client_build_hash: CONNECTOR_BUILD_HASH,
           chat_bridge_ready: bridgeReady(runtime, config),
         }, signal);
         await deliverBridgePayloads(config, heartbeat, wakeCoordinator);
@@ -908,6 +930,7 @@ async function runWorker(ctx, input, runtime, signal, wakeCoordinator) {
         () => workerRequest(config, token, "claim", {}, signal),
         (task) => processLease(ctx, config, token, task, signal, wakeCoordinator),
         signal,
+        claimGate,
       );
     } catch (error) {
       if (signal.aborted) break;
@@ -979,7 +1002,11 @@ export async function processLease(ctx, config, token, task, outerSignal, wakeCo
           return null;
         });
         if (failure) {
-          await enqueueTerminalWake(ctx, config, failure, wakeCoordinator, { taskId: task.id, terminalState: "failed" });
+          await enqueueTerminalWake(ctx, config, failure, wakeCoordinator, {
+            taskId: task.id,
+            task: { project_id: task.project_id, wake_target: task.wake_target, ...(task.legacy_binding === true ? { legacy_binding: true } : {}) },
+            terminalState: "failed",
+          });
         }
       }
       return;
@@ -1000,7 +1027,11 @@ export async function processLease(ctx, config, token, task, outerSignal, wakeCo
       return null;
     });
     if (result) {
-      await enqueueTerminalWake(ctx, config, result, wakeCoordinator, { taskId: task.id, terminalState: "completed" });
+      await enqueueTerminalWake(ctx, config, result, wakeCoordinator, {
+        taskId: task.id,
+        task: { project_id: task.project_id, wake_target: task.wake_target, ...(task.legacy_binding === true ? { legacy_binding: true } : {}) },
+        terminalState: "completed",
+      });
     }
   } finally {
     leaseAbort.abort();

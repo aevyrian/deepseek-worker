@@ -478,3 +478,77 @@ test("update logic never mutates Credentials, pairing identity, Worker ID or Wor
 test("scheduler interval is capped at six hours", () => {
   assert.equal(UPDATE_CHECK_INTERVAL_MS, 6 * 60 * 60 * 1000);
 });
+
+test("maintenance gate stays closed after install and reopens after a confirmed no-change failure", async () => {
+  const runtime = createUpdateRuntime();
+  let draining = false;
+  const enterMaintenance = async () => { draining = true; };
+  const leaveMaintenance = () => { draining = false; };
+
+  const installed = await performUpdateCheck({
+    runtime,
+    config: { autoUpdate: true, updateChannel: "stable" },
+    pluginManager: pluginManager({ onInstall: () => assert.equal(draining, true) }),
+    harnessVersion: "1.0.0",
+    fetchImpl: cloudOnly(manifest("0.8.0")),
+    enterMaintenance,
+    leaveMaintenance,
+  });
+  assert.equal(installed.updateState, "restart-required");
+  assert.equal(draining, true, "claims remain disabled until the host restarts into installed code");
+
+  const failedRuntime = createUpdateRuntime();
+  let failureDrain = false;
+  const failed = await performUpdateCheck({
+    runtime: failedRuntime,
+    config: { autoUpdate: true, updateChannel: "stable" },
+    pluginManager: pluginManager({ result: { changed: false, application: "failed", error: { code: "disk-full" } } }),
+    harnessVersion: "1.0.0",
+    fetchImpl: cloudOnly(manifest("0.8.0")),
+    enterMaintenance: async () => { failureDrain = true; },
+    leaveMaintenance: () => { failureDrain = false; },
+  });
+  assert.equal(failed.updateState, "failed");
+  assert.equal(failureDrain, false, "a confirmed no-change install failure safely resumes the old runtime");
+});
+
+test("ambiguous install and updater cancellation fail closed or safely release maintenance", async () => {
+  const ambiguousRuntime = createUpdateRuntime();
+  let ambiguousDrain = false;
+  const ambiguous = await performUpdateCheck({
+    runtime: ambiguousRuntime,
+    config: { autoUpdate: true, updateChannel: "stable" },
+    pluginManager: pluginManager({ result: { changed: true, application: "failed", error: { code: "host-error" } } }),
+    harnessVersion: "1.0.0",
+    fetchImpl: cloudOnly(manifest("0.8.0")),
+    enterMaintenance: async () => { ambiguousDrain = true; },
+    leaveMaintenance: () => { ambiguousDrain = false; },
+  });
+  assert.equal(ambiguous.updateState, "failed");
+  assert.equal(ambiguousDrain, true, "unknown on-disk state never resumes claims automatically");
+
+  let wait;
+  const reachedIdleWait = new Promise((resolve) => { wait = resolve; });
+  const controller = new AbortController();
+  const cancelledRuntime = createUpdateRuntime();
+  let cancelledDrain = false;
+  const pending = performUpdateCheck({
+    runtime: cancelledRuntime,
+    config: { autoUpdate: true, updateChannel: "stable" },
+    pluginManager: pluginManager(),
+    harnessVersion: "1.0.0",
+    fetchImpl: cloudOnly(manifest("0.8.0")),
+    signal: controller.signal,
+    isWorkerBusy: () => true,
+    enterMaintenance: async () => { cancelledDrain = true; },
+    leaveMaintenance: () => { cancelledDrain = false; },
+    sleepImpl: async (_ms, signal) => {
+      wait();
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    },
+  });
+  await reachedIdleWait;
+  controller.abort(new Error("Harness is shutting down"));
+  await assert.rejects(pending, /Harness is shutting down/);
+  assert.equal(cancelledDrain, false, "cancellation before install reopens the old worker gate");
+});

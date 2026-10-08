@@ -79,12 +79,16 @@ Once a newer version passes preflight:
     available
     -> waiting-idle
 
-Worker stops beginning new claims. If one task is already inside claim/session/lease/result/failure processing, updater waits. When that critical section exits:
+Worker atomically closes a shared claim gate before waiting. A claim already in flight must finish registration into the active task pool; after the gate closes no other claim can start. The updater then waits until all registered tasks finish their session/lease/result/failure processing:
 
     waiting-idle
     -> installing
 
 Only then does it call Plugin Manager.
+
+If Plugin Manager explicitly reports `failed` or `cancelled` with `changed: false`, the previous runtime reopens the claim gate. After a successful install, or an ambiguous result that might have changed files, the gate remains closed until Harness restarts. On startup, the Connector compares the installed package version with its loaded version and stays paused when a newer package is installed. The public runtime status also reports a SHA-256 build fingerprint computed once at module load from the package manifest and worker/Bridge/update source files; it does not change if those files are edited while the process is running.
+
+The drain does not cancel active work. Durable Outbox records remain in their existing local store, while queued tasks, leases and pending Project Events remain on Site. A Site Project Event being pending is independent of local Worker activity and is not a reason to block an idle drain.
 
 ## Install
 

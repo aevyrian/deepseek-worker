@@ -1,17 +1,27 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 
+import { BridgeWakeOutbox } from "../lib/bridge-outbox.mjs";
+import { WakeCoordinator } from "../lib/wake-coordinator.mjs";
+import { WakeTransport } from "../lib/wake-transport.mjs";
 import {
   ChatBridgeController,
   bridgePublicState,
   bridgeReady,
   buildBridgeControlMessage,
   buildCloudBridgeControlMessage,
+  composerContainsMessageScript,
   normalizeBridgeChatUrl,
   normalizeBridgeEnvelope,
+  normalizeWakeTarget,
   sameChatUrl,
   messageVisibleScript,
+  sendButtonMetadataScript,
+  composerSendStateScript,
 } from "../lib/chat-bridge.mjs";
 
 const ENVELOPE = {
@@ -22,6 +32,13 @@ const ENVELOPE = {
   task_id: "task_123",
   event_name: "task.completed",
   project_revision: 7,
+};
+
+// The Site only sets legacy_binding for a delivery whose project is origin-unbound.
+const LEGACY_ENVELOPE = { ...ENVELOPE, legacy_binding: true };
+const TARGETED_ENVELOPE = {
+  ...ENVELOPE,
+  wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-bound", url: "https://chatgpt.com/c/conversation-bound", source: "test" },
 };
 
 test("Chat Bridge only accepts chatgpt.com HTTPS bindings", () => {
@@ -114,7 +131,7 @@ test("Controller deduplicates an already-sent message key before any browser acc
       chatBridgeDebugPort: 9223,
     }),
   });
-  const result = await controller.sendEnvelope(ENVELOPE);
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
   assert.equal(result.ok, true);
   assert.equal(result.deduplicated, true);
 });
@@ -133,6 +150,10 @@ function fakeCdp({
   runtimeErrors = [],
   runtimeError,
   scriptException = false,
+  sendControl = { buttonCount: 1, selectorMatches: { 'button[data-testid="send-button"]': 1 }, candidates: [], chosen: { selector: 'button[data-testid="send-button"]', x: 420, y: 700, metadata: { tagName: "BUTTON", dataTestId: "send-button", disabled: false, visible: true, nearComposer: true, hitMatchesButton: true } } },
+  mouseClickWorks = true,
+  enterSends = true,
+  submissionPendingAfterClick = false,
 } = {}) {
   const calls = [];
   const pendingSpaUrls = [...spaUrls];
@@ -146,6 +167,8 @@ function fakeCdp({
   let navigated = false;
   let composerChecks = 0;
   let messageInserted = false;
+  let messageSubmitted = false;
+  let clickReleased = false;
   const cdp = {
     async open() { calls.push(["open"]); },
     close() {},
@@ -172,6 +195,7 @@ function fakeCdp({
         }
         return { targetInfo: { targetId: params.targetId, type: "page", url: targetUrls.get(params.targetId) } };
       }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main-frame" } } };
       if (method === "Browser.getWindowForTarget") return { windowId: 1 };
       if (method === "Page.navigate") {
         navigated = true;
@@ -194,6 +218,9 @@ function fakeCdp({
           const authRequired = login || composerChecks >= loginAfterComposerChecks;
           return { result: { value: { href: authRequired ? "https://chatgpt.com/auth/login" : href, authRequired } } };
         }
+        if (params.expression.includes("messages.some")) return { result: { value: messageSubmitted } };
+        if (params.expression.includes("composerHasMessageKey")) return { result: { value: { composerFound: true, composerHasMessageKey: messageInserted && !messageSubmitted, composerEmpty: !messageInserted || messageSubmitted, sendEnabled: messageInserted && !messageSubmitted && !(clickReleased && submissionPendingAfterClick), submitting: clickReleased && submissionPendingAfterClick } } };
+        if (params.expression.includes("'MESSAGE_KEY: '")) return { result: { value: { ok: messageInserted && !messageSubmitted } } };
         if (params.expression.includes("composer_not_found")) {
           composerChecks += 1;
           onComposerCheck?.(composerChecks);
@@ -203,12 +230,16 @@ function fakeCdp({
             targetUrls.set(activeTargetId, href);
           }
           const available = pendingComposerSequence.length ? pendingComposerSequence.shift() : composerAvailable;
-          return { result: { value: { ok: available, reason: available ? undefined : "composer_not_found", href } } };
+          return { result: { value: { ok: available, focused: available, reason: available ? undefined : "composer_not_found", href } } };
         }
-        if (params.expression.includes("PROJECT_ID: ")) return { result: { value: messageInserted } };
-        if (params.expression.includes("button.click()")) return { result: { value: true } };
+        if (params.expression.includes("selectorMatches") && params.expression.includes("send-button")) return { result: { value: sendControl } };
       }
       if (method === "Input.insertText") messageInserted = true;
+      if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased" && params.button === "left") {
+        clickReleased = true;
+        if (mouseClickWorks) messageSubmitted = true;
+      }
+      if (method === "Input.dispatchKeyEvent" && params.type === "keyUp" && enterSends) messageSubmitted = true;
       return {};
     },
   };
@@ -297,15 +328,368 @@ test("Bridge composer wait reports a login transition", async () => {
   assert.equal(controller.status().state, "needs-login");
 });
 
-test("sendMessage uses the shared bounded composer wait helper", async () => {
+test("sendMessage uses the shared bounded composer wait helper and a CDP mouse click", async () => {
   const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/bound", composerSequence: [false, false, true] });
   const controller = fakeController(fake);
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
-  const result = await controller.sendEnvelope(ENVELOPE);
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
   assert.equal(result.ok, true);
   assert.equal(result.deduplicated, false);
-  assert.equal(fake.calls.filter(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("composer_not_found")).length, 3);
+  assert.ok(fake.calls.filter(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("composer_not_found")).length >= 4);
   assert.ok(fake.calls.some(([method]) => method === "Input.insertText"));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Input.dispatchMouseEvent").map(([, params]) => params.type), ["mouseMoved", "mousePressed", "mouseReleased"]);
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchKeyEvent"));
+});
+
+test("sendMessage prefers the existing page that matches the requested conversation", async () => {
+  const fake = fakeCdp({ targets: [
+    { targetId: "other", type: "page", url: "https://chatgpt.com/c/bound" },
+    { targetId: "requested", type: "page", url: "https://chatgpt.com/c/other" },
+  ] });
+  const controller = fakeController(fake);
+  controller.getConfig = () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: "https://chatgpt.com/c/other", chatBridgeDebugPort: 9223 });
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "requested"));
+  assert.ok(!fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/other"));
+});
+
+test("sendMessage navigates one existing ChatGPT tab to the configured conversation without creating another", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/unrelated" });
+  const controller = fakeController(fake, "https://chatgpt.com/c/requested");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/requested"));
+  assert.ok(!fake.calls.some(([method]) => method === "Target.createTarget"));
+});
+
+test("sendMessage reuses the single blank Bridge page instead of creating another tab", async () => {
+  const fake = fakeCdp({ pageUrl: "about:blank" });
+  const controller = fakeController(fake, "https://chatgpt.com/c/requested");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/requested"));
+  assert.ok(!fake.calls.some(([method]) => method === "Target.createTarget"));
+});
+
+test("composer message-key verification checks the composer value without reading unrelated page text", () => {
+  const expression = composerContainsMessageScript("message-a");
+  const composer = { value: "[DSW] MESSAGE_KEY: message-a", getBoundingClientRect: () => ({ width: 400, height: 60 }) };
+  const result = runInNewContext(expression, {
+    document: { querySelectorAll: (selector) => selector === "#prompt-textarea" ? [composer] : [] },
+    getComputedStyle: () => ({ visibility: "visible", display: "block" }),
+  });
+  assert.equal(result.ok, true);
+  assert.doesNotMatch(expression, /document\.body|cookie|localStorage|sessionStorage/u);
+});
+
+test("composer verification prefers the focused composer when the page exposes several editors", () => {
+  const expression = composerContainsMessageScript("message-active");
+  const first = { value: "", getBoundingClientRect: () => ({ width: 400, height: 60 }) };
+  const active = { value: "[DSW] MESSAGE_KEY: message-active", getBoundingClientRect: () => ({ width: 400, height: 60 }) };
+  const result = runInNewContext(expression, {
+    document: { activeElement: active, querySelectorAll: (selector) => selector === "main [contenteditable=\"true\"]" ? [first, active] : [] },
+    getComputedStyle: () => ({ visibility: "visible", display: "block" }),
+  });
+  assert.equal(result.ok, true);
+});
+
+test("send button metadata selects only a visible send control near the composer and never reads page text", () => {
+  const form = {};
+  const makeButton = (testId, label, x) => ({
+    tagName: "BUTTON", disabled: false,
+    getAttribute(name) { return ({ "data-testid": testId, "aria-label": label, role: null })[name] ?? null; },
+    contains(element) { return element === this; },
+    getBoundingClientRect() { return { x, y: 10, width: 24, height: 24 }; },
+    closest(selector) { return selector === "form" ? form : null; },
+  });
+  const stop = makeButton("stop-button", "Stop generating", 10);
+  const voice = makeButton("voice-button", "Voice mode", 40);
+  const attachment = makeButton("attach-file-button", "Attach files", 55);
+  const send = makeButton("send-button", "Send", 70);
+  const composer = { getBoundingClientRect: () => ({ x: 0, y: 0, width: 500, height: 30 }), closest: () => form };
+  form.contains = (element) => [stop, voice, attachment, send].includes(element);
+  const result = runInNewContext(sendButtonMetadataScript(), {
+    document: {
+      querySelectorAll(selector) {
+        if (selector === "button") return [stop, voice, attachment, send];
+        if (selector === 'button[data-testid="send-button"]') return [send];
+        if (selector === 'button[aria-label*="Send" i]' || selector === 'button[aria-label*="发送"]') return [];
+        if (selector === 'main [contenteditable="true"]') return [composer];
+        return [];
+      },
+      querySelector: () => null,
+      elementFromPoint: () => send,
+    },
+    getComputedStyle: () => ({ visibility: "visible", display: "block", opacity: "1" }),
+  });
+  assert.equal(result.buttonCount, 4);
+  assert.equal(result.chosen.x, 82);
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].dataTestId, "send-button");
+  assert.equal(result.chosen.metadata.hitMatchesButton, true);
+  assert.doesNotMatch(sendButtonMetadataScript(), /innerText|textContent|document\.body/u);
+  assert.doesNotMatch(sendButtonMetadataScript(), /\.click\(/u);
+});
+
+test("send button metadata recognizes a real ChatGPT send button aligned beside the composer", () => {
+  const send = {
+    tagName: "BUTTON", disabled: false,
+    getAttribute(name) { return ({ "data-testid": null, "aria-label": "发送", role: null })[name] ?? null; },
+    contains(element) { return element === this; },
+    getBoundingClientRect() { return { x: 850, y: 822, width: 36, height: 36 }; },
+    closest: () => null,
+  };
+  const composer = { getBoundingClientRect: () => ({ x: 200, y: 790, width: 700, height: 80 }), closest: () => ({ contains: () => false }) };
+  const result = runInNewContext(sendButtonMetadataScript(), {
+    document: {
+      querySelectorAll(selector) {
+        if (selector === "button") return [send];
+        if (selector === 'button[data-testid="send-button"]') return [];
+        if (selector === 'button[aria-label*="Send" i]' || selector === 'button[aria-label*="发送"]') return [send];
+        if (selector === 'main [contenteditable="true"]') return [composer];
+        return [];
+      },
+      querySelector: () => null,
+      elementFromPoint: () => send,
+    },
+    getComputedStyle: () => ({ visibility: "visible", display: "flex", opacity: "1" }),
+  });
+  assert.equal(result.chosen?.metadata.ariaLabel, "发送");
+  assert.equal(result.chosen?.metadata.nearComposer, true);
+});
+
+test("sendMessage uses Enter only when no safe send button is available", async () => {
+  const fake = fakeCdp({
+    sendControl: { buttonCount: 3, selectorMatches: { 'button[data-testid="send-button"]': 0 }, candidates: [
+      { tagName: "BUTTON", dataTestId: "stop-button", ariaLabel: "Stop generating", visible: true, nearComposer: true, forbidden: true },
+      { tagName: "BUTTON", dataTestId: "voice-button", ariaLabel: "Voice mode", visible: true, nearComposer: true, forbidden: true },
+    ], chosen: null },
+  });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.equal(result.ok, true);
+  assert.ok(fake.calls.some(([method]) => method === "Input.dispatchKeyEvent"));
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"));
+});
+
+test("sendMessage fails if MESSAGE_KEY is absent from conversation messages after submission", async () => {
+  const fake = fakeCdp({ mouseClickWorks: false, enterSends: false });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => ["bridge_send_uncertain", "bridge_send_not_submitted"].includes(error.code));
+  assert.ok(fake.calls.some(([method]) => method === "Input.insertText"));
+  assert.ok(["error", "uncertain"].includes(controller.status().state));
+});
+
+test("sendMessage holds a MESSAGE_KEY with an uncertain submit result and never retries it", async () => {
+  const fake = fakeCdp({ mouseClickWorks: false, enterSends: false, submissionPendingAfterClick: true });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE));
+  const callCount = fake.calls.length;
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => error.code === "bridge_send_uncertain");
+  assert.equal(fake.calls.length, callCount);
+  assert.equal(controller.status().state, "uncertain");
+});
+
+test("send button metadata rejects a center hit covered by an unrelated control", () => {
+  const form = {};
+  const hit = { tagName: "BUTTON", getAttribute: () => "voice-button" };
+  const send = {
+    tagName: "BUTTON", disabled: false,
+    getAttribute(name) { return ({ "data-testid": "send-button", "aria-label": "Send", role: null })[name] ?? null; },
+    getBoundingClientRect: () => ({ x: 70, y: 10, width: 24, height: 24 }),
+    closest: () => form,
+    contains: (element) => element === send,
+  };
+  const composer = { getBoundingClientRect: () => ({ x: 0, y: 0, width: 500, height: 30 }), closest: () => form };
+  form.contains = (element) => element === send;
+  const result = runInNewContext(sendButtonMetadataScript(), {
+    document: {
+      querySelectorAll(selector) {
+        if (selector === "button") return [send, hit];
+        if (selector === 'button[data-testid="send-button"]') return [send];
+        if (selector === 'button[aria-label*="Send" i]' || selector === 'button[aria-label*="发送"]') return [];
+        if (selector === 'main [contenteditable="true"]') return [composer];
+        return [];
+      },
+      querySelector: () => null,
+      elementFromPoint: () => hit,
+    },
+    getComputedStyle: () => ({ visibility: "visible", display: "block", opacity: "1" }),
+  });
+  assert.equal(result.candidates[0].hitMatchesButton, false);
+  assert.equal(result.chosen, null);
+});
+
+test("post-click state distinguishes a safe draft from a possibly submitted message without reading chat text", () => {
+  const expression = composerSendStateScript("message-a");
+  assert.match(expression, /composerHasMessageKey/u);
+  assert.match(expression, /submitting/u);
+  assert.match(expression, /staleStopControl/u);
+  assert.match(expression, /visibleErrors/u);
+  assert.doesNotMatch(expression, /document\.body/u);
+});
+
+test("idle probe distinguishes enabled generation, disabled stale Stop, and an idle composer", () => {
+  const composer = { value: "", getBoundingClientRect: () => ({ width: 400, height: 40 }) };
+  const stop = (disabled) => ({
+    disabled,
+    getAttribute(name) { return name === "aria-label" ? "Stop generating" : name === "data-testid" ? null : null; },
+    getBoundingClientRect: () => ({ x: 10, y: 10, width: 32, height: 32 }),
+  });
+  const probe = (controls) => runInNewContext(composerSendStateScript("message-a"), {
+    document: {
+      activeElement: composer,
+      querySelectorAll(selector) {
+        if (selector === "button") return controls;
+        if (selector === '[role="alert"],[aria-live="assertive"]') return [];
+        return [composer];
+      },
+    },
+    getComputedStyle: () => ({ display: "flex", visibility: "visible", opacity: "1" }),
+  });
+  const generating = probe([stop(false)]);
+  assert.equal(generating.submitting, true);
+  assert.equal(generating.idle, false);
+  const stale = probe([stop(true)]);
+  assert.equal(stale.submitting, false);
+  assert.equal(stale.staleStopControl, true);
+  assert.equal(stale.idle, false);
+  const idle = probe([]);
+  assert.equal(idle.submitting, false);
+  assert.equal(idle.staleStopControl, false);
+  assert.equal(idle.idle, true);
+});
+
+test("idle probe ignores offscreen one-pixel accessibility live regions", () => {
+  const composer = { value: "", getBoundingClientRect: () => ({ x: 0, y: 0, width: 400, height: 40 }) };
+  const hiddenLiveRegion = { getBoundingClientRect: () => ({ x: -1, y: -1, left: -1, top: -1, right: 0, bottom: 0, width: 1, height: 1 }) };
+  const result = runInNewContext(composerSendStateScript("message-a"), {
+    document: {
+      activeElement: composer,
+      documentElement: { clientWidth: 1920, clientHeight: 1080 },
+      querySelectorAll(selector) {
+        if (selector === "button") return [];
+        if (selector === '[role="alert"],[aria-live="assertive"]') return [hiddenLiveRegion, hiddenLiveRegion];
+        return [composer];
+      },
+    },
+    getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+  });
+  assert.equal(result.visibleErrors, 0);
+  assert.equal(result.idle, true);
+});
+
+test("sendEnvelope uses the delivery wake_target instead of the legacy global conversation", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/legacy" });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const targetUrl = "https://chatgpt.com/c/conversation-A";
+  await controller.sendEnvelope({ ...ENVELOPE, wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-A", url: targetUrl, source: "test" } });
+  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === targetUrl));
+  assert.ok(!fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/bound"));
+});
+
+test("sendEnvelope without wake_target uses the global conversation only for an explicit legacy delivery", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/other" });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/legacy-bound"));
+});
+
+test("sendEnvelope refuses a delivery that has neither a wake_target nor an explicit legacy flag", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/other" });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  let browserTouched = false;
+  controller.ensureBrowser = async () => { browserTouched = true; return { version: { webSocketDebuggerUrl: "ws://fake" } }; };
+  await assert.rejects(controller.sendEnvelope(ENVELOPE), (error) => error.code === "bridge_wake_target_required");
+  assert.equal(browserTouched, false);
+  assert.equal(fake.calls.length, 0);
+  assert.equal(normalizeBridgeEnvelope(ENVELOPE).legacyBinding, false);
+  assert.equal(normalizeBridgeEnvelope(LEGACY_ENVELOPE).legacyBinding, true);
+  assert.equal(normalizeBridgeEnvelope({ ...ENVELOPE, legacy_binding: "yes" }).legacyBinding, false);
+});
+
+test("sendLocalWake refuses an unbound delivery and honours the Site legacy flag", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/other" });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const base = { project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1", terminal_state: "completed" };
+  await assert.rejects(controller.sendLocalWake(base), (error) => error.code === "bridge_wake_target_required");
+  await controller.sendLocalWake({ ...base, legacy_binding: true });
+  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/legacy-bound"));
+  const targeted = fakeCdp({ pageUrl: "https://chatgpt.com/c/other" });
+  const targetedController = fakeController(targeted, "https://chatgpt.com/c/legacy-bound");
+  targetedController.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await targetedController.sendLocalWake({ ...base, legacy_binding: true, wake_target: TARGETED_ENVELOPE.wake_target });
+  assert.ok(targeted.calls.some(([method, params]) => method === "Page.navigate" && params.url === TARGETED_ENVELOPE.wake_target.url));
+  assert.ok(!targeted.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/legacy-bound"));
+});
+
+test("reconcileDelivery refuses to reconcile against the fixed binding without the legacy flag", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/legacy-bound" });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const delivery = { project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1" };
+  assert.deepEqual(await controller.reconcileDelivery(delivery), { state: "uncertain", reason: "target_unbound" });
+  assert.equal(fake.calls.length, 0);
+});
+
+test("Site deliveries flow through the durable outbox and transport into each delivery's own conversation", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dsw-site-delivery-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const outbox = new BridgeWakeOutbox({ filePath: join(directory, "outbox.json") });
+  const targetA = { type: "chatgpt_conversation", conversation_id: "conversation-A", url: "https://chatgpt.com/c/conversation-A", source: "site" };
+  const targetB = { type: "chatgpt_conversation", conversation_id: "conversation-B", url: "https://chatgpt.com/c/conversation-B", source: "site" };
+  const coordinator = new WakeCoordinator({ outbox });
+  // Completion of B arrives before A, and each carries only its own target.
+  await coordinator.acceptResponse({ bridge_delivery: {
+    delivery_id: "delivery-B", message_key: "message-B", project_id: "project-B", event_id: "event-B",
+    task_id: "task-B", event_name: "task.completed", project_revision: 2, wake_target: targetB,
+  } });
+  await coordinator.acceptResponse({ bridge_delivery: {
+    delivery_id: "delivery-A", message_key: "message-A", project_id: "project-A", event_id: "event-A",
+    task_id: "task-A", event_name: "task.completed", project_revision: 2, wake_target: targetA,
+  } });
+  assert.equal((await outbox.findByMessageKey("message-A")).wake_target.url, targetA.url);
+  assert.equal((await outbox.findByMessageKey("message-B")).wake_target.url, targetB.url);
+  assert.equal((await outbox.findByMessageKey("message-A")).legacy_binding, false);
+
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/legacy-bound" });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const transport = new WakeTransport({ outbox, bridge: controller });
+  await transport.drainOnce();
+
+  const navigations = fake.calls.filter(([method]) => method === "Page.navigate").map(([, params]) => params.url);
+  assert.ok(navigations.includes(targetA.url), navigations.join(","));
+  assert.ok(navigations.includes(targetB.url), navigations.join(","));
+  assert.ok(!navigations.includes("https://chatgpt.com/c/legacy-bound"));
+  assert.equal((await outbox.findByMessageKey("message-A")).delivery_state, "delivered");
+  assert.equal((await outbox.findByMessageKey("message-B")).delivery_state, "delivered");
+});
+
+test("wake target requires an explicit ChatGPT conversation URL and preserves validated metadata", () => {
+  const target = normalizeWakeTarget({ type: "chatgpt_conversation", conversation_id: "conv-a", url: "https://chatgpt.com/c/conv-a", source: "mcp", captured_at: "2026-10-08T00:00:00.000Z" });
+  assert.equal(target.url, "https://chatgpt.com/c/conv-a");
+  assert.equal(target.conversation_id, "conv-a");
+  assert.equal(normalizeWakeTarget({ type: "chatgpt_conversation", url: "https://chatgpt.com/g/g-p-project/c/conv-b", conversation_id: "conv-b" }).url, "https://chatgpt.com/g/g-p-project/c/conv-b");
+  assert.equal(normalizeWakeTarget(null), null);
+  assert.throws(() => normalizeWakeTarget({ type: "chatgpt_conversation", conversation_id: "conv-a" }), /bridge_wake_target_invalid/u);
+  assert.throws(() => normalizeWakeTarget({ type: "chatgpt_conversation", url: "https://chatgpt.com/" }), /bridge_wake_target_invalid/u);
+});
+
+test("message confirmation inspects conversation message nodes rather than page text or composer", () => {
+  const expression = messageVisibleScript("project-a", "task-a", "message-a");
+  const message = { textContent: "PROJECT_ID: project-a TASK_ID: task-a MESSAGE_KEY: message-a" };
+  assert.equal(runInNewContext(expression, { document: { querySelectorAll: (selector) => selector.includes("data-user-message-bubble") ? [message] : [], body: { innerText: "same text in unrelated page chrome" } } }), true);
+  assert.doesNotMatch(expression, /document\.body|innerText/u);
+  assert.match(expression, /data-user-message-bubble|data-message-author-role|conversation-turn-/u);
+  assert.doesNotMatch(expression, /#prompt-textarea|contenteditable/u);
 });
 
 test("Generated login-state script recognizes auth paths and their subpaths without regex escaping", async () => {

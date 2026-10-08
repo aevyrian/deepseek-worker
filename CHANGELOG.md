@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.9-beta.1 — Stability Test Release
+
+- Adds durable Chat Bridge delivery recovery with bounded exponential retry backoff and retained failure diagnostics.
+- Reconciles interrupted sends after restart before retrying, preventing blind duplicate submissions.
+- Adds an atomic Worker claim drain for safe updates and reports the loaded Connector build fingerprint.
+- Includes delivery-specific wake target persistence and validation where supplied by the Site; this release does not identify the originating ChatGPT conversation automatically.
+- This is a beta test release and is not the stable 1.0.0 release.
+
 ## 0.7.8 — Chat Bridge Composer Wait
 
 - Chat Bridge readiness checks now wait for the SPA-rendered composer within a bounded deadline. `testBridge` and `sendMessage` share the same wait path and report conversation changes or login transitions while waiting.

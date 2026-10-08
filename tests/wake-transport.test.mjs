@@ -5,12 +5,13 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { BridgeWakeOutbox } from "../lib/bridge-outbox.mjs";
+import { WakeCoordinator } from "../lib/wake-coordinator.mjs";
 import { WakeTransport } from "../lib/wake-transport.mjs";
 
-async function makeOutbox(t) {
+async function makeOutbox(t, label = "outbox", options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dsw-wake-transport-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  return new BridgeWakeOutbox({ filePath: join(directory, "outbox.json") });
+  return new BridgeWakeOutbox({ filePath: join(directory, `${label}.json`), ...options });
 }
 
 test("transport routes Cloud and local wake records and marks visible sends delivered", async (t) => {
@@ -32,8 +33,116 @@ test("transport routes Cloud and local wake records and marks visible sends deli
   assert.equal((await outbox.findByMessageKey("message-cloud")).delivery_state, "delivered");
 });
 
-test("transport keeps failed sends pending with sanitized errors and retries", async (t) => {
+test("out-of-order A/B Cloud completions route only to each delivery's own conversation", async (t) => {
   const outbox = await makeOutbox(t);
+  const coordinator = new WakeCoordinator({ outbox });
+  const targetA = { type: "chatgpt_conversation", conversation_id: "conversation-A", url: "https://chatgpt.com/c/conversation-A", source: "contract" };
+  const targetB = { type: "chatgpt_conversation", conversation_id: "conversation-B", url: "https://chatgpt.com/c/conversation-B", source: "contract" };
+  const sent = [];
+  const transport = new WakeTransport({
+    outbox,
+    bridge: { async sendEnvelope(envelope) { sent.push([envelope.project_id, envelope.wake_target?.url]); } },
+  });
+  const delivery = (suffix, target) => ({
+    delivery_id: `delivery-${suffix}`, message_key: `message-${suffix}`, project_id: `project-${suffix}`, event_id: `event-${suffix}`,
+    task_id: `task-${suffix}`, event_name: "task.completed", project_revision: 2, wake_target: target,
+  });
+  await coordinator.acceptResponse({ bridge_delivery: delivery("B", targetB) });
+  await coordinator.acceptResponse({ bridge_delivery: delivery("A", targetA) });
+  assert.deepEqual(await transport.drainOnce(), { attempted: 2, delivered: 2 });
+  assert.deepEqual(sent, [["project-B", targetB.url], ["project-A", targetA.url]]);
+  assert.equal((await outbox.findByMessageKey("message-B")).wake_target.url, targetB.url);
+  assert.equal((await outbox.findByMessageKey("message-A")).wake_target.url, targetA.url);
+});
+
+test("a delivery without wake_target reaches the configured binding only when the Site marked it legacy", async (t) => {
+  const outbox = await makeOutbox(t);
+  const coordinator = new WakeCoordinator({ outbox });
+  const envelope = {
+    delivery_id: "delivery-legacy", message_key: "message-legacy", project_id: "project-legacy", event_id: "event-legacy",
+    task_id: "task-legacy", event_name: "task.completed", project_revision: 2,
+  };
+  await coordinator.acceptResponse({ bridge_delivery: envelope });
+  const plain = await outbox.findByMessageKey("message-legacy");
+  assert.equal(Object.hasOwn(plain, "wake_target"), false);
+  assert.equal(plain.legacy_binding, false);
+  const plainSent = [];
+  await new WakeTransport({ outbox, bridge: { async sendEnvelope(row) { plainSent.push(row); } } }).drainOnce();
+  assert.equal(Object.hasOwn(plainSent[0], "legacy_binding"), false);
+
+  const legacyOutbox = await makeOutbox(t, "legacy");
+  await new WakeCoordinator({ outbox: legacyOutbox }).acceptResponse({ bridge_delivery: { ...envelope, legacy_binding: true } });
+  const marked = await legacyOutbox.findByMessageKey("message-legacy");
+  assert.equal(Object.hasOwn(marked, "wake_target"), false);
+  assert.equal(marked.legacy_binding, true);
+  const legacySent = [];
+  await new WakeTransport({ outbox: legacyOutbox, bridge: { async sendEnvelope(row) { legacySent.push(row); } } }).drainOnce();
+  assert.equal(legacySent[0].legacy_binding, true);
+  assert.equal(Object.hasOwn(legacySent[0], "wake_target"), false);
+});
+
+test("local Project terminal response flows through the durable outbox, transport, and cloud ack", async (t) => {
+  const outbox = await makeOutbox(t);
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const sent = [];
+  const acknowledgements = [];
+  const transport = new WakeTransport({
+    outbox,
+    bridge: { async sendEnvelope(envelope) { sent.push(envelope); } },
+    acknowledgeDelivery: async (delivery) => { acknowledgements.push(delivery); },
+  });
+  const coordinator = new WakeCoordinator({ outbox, transport });
+  const running = transport.run(controller.signal);
+  const bridgeDelivery = {
+    delivery_id: "delivery-project-task", message_key: "message-project-task", project_id: "project-1",
+    event_id: "event-project-task", task_id: "task-local", event_name: "task.completed", project_revision: 9,
+  };
+
+  try {
+    const accepted = await coordinator.acceptResponse({ project_id: "project-1", bridge_delivery: bridgeDelivery });
+    assert.equal(accepted.accepted, 1);
+    assert.equal(accepted.localWake, null);
+    const pending = await outbox.findByMessageKey(bridgeDelivery.message_key);
+    assert.equal(pending.delivery_state, "pending");
+    assert.equal(pending.project_id, "project-1");
+    assert.equal(pending.task_id, "task-local");
+    assert.equal(pending.event_id, "event-project-task");
+
+    for (let index = 0; index < 50 && (sent.length === 0 || acknowledgements.length === 0); index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(sent.length, 1, "transport kick should send the adopted delivery");
+    assert.equal(acknowledgements.length, 1);
+    assert.equal(acknowledgements[0].delivery_id, bridgeDelivery.delivery_id);
+    assert.equal((await outbox.findByMessageKey(bridgeDelivery.message_key)).delivery_state, "delivered");
+  } finally {
+    controller.abort();
+    await running;
+  }
+});
+
+test("permanent delivery rejection sends only the stable identity fields", async (t) => {
+  const outbox = await makeOutbox(t);
+  const rejected = [];
+  const transport = new WakeTransport({
+    outbox,
+    bridge: {},
+    rejectDelivery: async (identity, reason) => rejected.push({ identity, reason }),
+  });
+  const result = await transport.rejectCloudDelivery({
+    delivery_id: "delivery-1", message_key: "message-1", project_id: "project-1", event_id: "event-1",
+    task_id: "task-1", event_name: "task.completed", project_revision: 3,
+    wake_target: { type: "chatgpt_conversation", url: "https://chatgpt.com/c/private-target" },
+  }, "bridge_wake_target_conflict");
+  assert.equal(result, true);
+  assert.deepEqual(rejected, [{ identity: {
+    delivery_id: "delivery-1", message_key: "message-1", project_id: "project-1", event_id: "event-1",
+    task_id: "task-1", event_name: "task.completed", project_revision: 3,
+  }, reason: "bridge_wake_target_conflict" }]);
+});
+
+test("transport keeps failed sends pending with sanitized errors and retries", async (t) => {
+  let now = "2026-10-08T00:00:00.000Z";
+  const outbox = await makeOutbox(t, "outbox", { now: () => now, retryBaseMs: 1000, retryMaxMs: 8000 });
   const row = await outbox.enqueueLocal({ projectId: "project-1", taskId: "task-1", terminalState: "failed" });
   let attempts = 0;
   const transport = new WakeTransport({
@@ -45,29 +154,87 @@ test("transport keeps failed sends pending with sanitized errors and retries", a
   const failed = await outbox.findByMessageKey(row.message_key);
   assert.equal(failed.delivery_state, "pending");
   assert.doesNotMatch(failed.last_error, /secret|Alice/iu);
+  assert.equal(failed.next_attempt_at, "2026-10-08T00:00:01.000Z");
+  assert.equal(failed.last_failure, failed.last_error);
+  assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 0 }, "delivery is not retried before its persisted backoff expires");
+  now = "2026-10-08T00:00:01.000Z";
   assert.deepEqual(await transport.drainOnce(), { attempted: 1, delivered: 1 });
-  assert.equal((await outbox.findByMessageKey(row.message_key)).delivery_state, "delivered");
+  const delivered = await outbox.findByMessageKey(row.message_key);
+  assert.equal(delivered.delivery_state, "delivered");
+  assert.equal(delivered.last_error, null);
+  assert.equal(delivered.last_failure, failed.last_failure, "successful retry keeps the sanitized failure evidence");
 });
 
-test("recovered pending wake settles delivered when ChatGPT already shows its message key", async (t) => {
+test("interrupted send is reconciled as delivered before any resend", async (t) => {
   const { filePath } = await makeOutbox(t);
   const firstProcess = new BridgeWakeOutbox({ filePath });
   const queued = await firstProcess.enqueueLocal({ projectId: "project-1", taskId: "task-visible", terminalState: "completed" });
   await firstProcess.beginAttempt(queued.message_key);
 
   const restartedOutbox = new BridgeWakeOutbox({ filePath });
+  let reconcileCalls = 0;
   let bridgeCalls = 0;
   const transport = new WakeTransport({
     outbox: restartedOutbox,
-    bridge: { async sendLocalWake(delivery) {
+    bridge: { async reconcileDelivery(delivery) {
+      reconcileCalls += 1;
       bridgeCalls += 1;
       assert.equal(delivery.message_key, queued.message_key);
-      return { ok: true, deduplicated: true };
+      return { state: "delivered" };
     } },
   });
-  assert.deepEqual(await transport.drainOnce(), { attempted: 1, delivered: 1 });
+  assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 1 });
+  assert.equal(reconcileCalls, 1);
   assert.equal(bridgeCalls, 1);
   assert.equal((await restartedOutbox.findByMessageKey(queued.message_key)).delivery_state, "delivered");
+  assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 0 });
+  assert.equal(reconcileCalls, 1, "uncertain delivery is checked at most once per process");
+});
+
+test("a confirmed safe draft receives one bounded recovery attempt", async (t) => {
+  const { filePath } = await makeOutbox(t);
+  const first = new BridgeWakeOutbox({ filePath });
+  const queued = await first.enqueueLocal({ projectId: "project-1", taskId: "task-draft", terminalState: "completed" });
+  await first.beginAttempt(queued.message_key);
+  const restarted = new BridgeWakeOutbox({ filePath });
+  let reconcileCalls = 0;
+  let sendCalls = 0;
+  const transport = new WakeTransport({
+    outbox: restarted,
+    bridge: {
+      async reconcileDelivery() { reconcileCalls += 1; return { state: "safe_draft" }; },
+      async sendLocalWake() { sendCalls += 1; },
+    },
+  });
+  assert.deepEqual(await transport.drainOnce(), { attempted: 1, delivered: 1 });
+  assert.equal(reconcileCalls, 1);
+  assert.equal(sendCalls, 1);
+  assert.equal((await restarted.findByMessageKey(queued.message_key)).recovery_attempts, 1);
+  assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 0 });
+  assert.equal(sendCalls, 1);
+});
+
+test("an uncertain delivery that cannot be reconciled stays quarantined without resend", async (t) => {
+  const { filePath } = await makeOutbox(t);
+  const first = new BridgeWakeOutbox({ filePath });
+  const queued = await first.enqueueLocal({ projectId: "project-1", taskId: "task-unknown", terminalState: "completed" });
+  await first.beginAttempt(queued.message_key);
+  const restarted = new BridgeWakeOutbox({ filePath });
+  let reconcileCalls = 0;
+  let sendCalls = 0;
+  const transport = new WakeTransport({
+    outbox: restarted,
+    bridge: {
+      async reconcileDelivery() { reconcileCalls += 1; return { state: "uncertain", reason: "stale_stop_control" }; },
+      async sendLocalWake() { sendCalls += 1; },
+    },
+    logger: { warn() {} },
+  });
+  assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 0 });
+  assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 0 });
+  assert.equal(reconcileCalls, 1);
+  assert.equal(sendCalls, 0);
+  assert.equal((await restarted.findByMessageKey(queued.message_key)).delivery_state, "uncertain");
 });
 
 test("transport run resumes pending work, responds to kicks and stops on abort", async (t) => {

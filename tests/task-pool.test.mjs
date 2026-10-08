@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AsyncTaskPool, fillTaskPool } from "../lib/task-pool.mjs";
+import { AsyncTaskPool, fillTaskPool, WorkerClaimGate } from "../lib/task-pool.mjs";
 
 function deferred() {
   let resolve;
@@ -87,6 +87,40 @@ test("fillTaskPool stops when Cloud repeats an already-active lease", async () =
   assert.equal(claims, 1);
   gate.resolve();
   await pool.waitForIdle();
+});
+
+test("maintenance drain closes the claim gate atomically and waits for claimed work", async () => {
+  const claimResult = deferred();
+  const taskResult = deferred();
+  const pool = new AsyncTaskPool({ limit: 4 });
+  const gate = new WorkerClaimGate();
+  gate.setIdleWaiter(() => pool.waitForIdle());
+  let claims = 0;
+
+  const filling = fillTaskPool(
+    pool,
+    async () => { claims += 1; return claimResult.promise; },
+    async () => taskResult.promise,
+    new AbortController().signal,
+    gate,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const draining = gate.drain();
+  assert.equal(gate.draining, true);
+  assert.equal(claims, 1);
+
+  claimResult.resolve({ task: { id: "leased-before-drain" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(pool.snapshotIds(), ["leased-before-drain"]);
+  assert.equal(claims, 1, "no second claim starts after maintenance closes the gate");
+
+  taskResult.resolve();
+  await Promise.all([filling, draining]);
+  assert.equal(pool.size, 0);
+  assert.equal(gate.draining, true, "the gate stays closed until updater explicitly resumes it");
+
+  gate.reopen();
+  assert.equal(gate.draining, false);
 });
 
 test("task runner errors are contained and release capacity", async () => {
