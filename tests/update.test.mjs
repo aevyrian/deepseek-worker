@@ -13,6 +13,7 @@ import {
   isTrustedSource,
   parseSemver,
   performUpdateCheck,
+  performUpdateInstall,
   publicUpdateStatus,
   resolveUpdateCandidate,
   selectUpdateCandidate,
@@ -119,6 +120,7 @@ test("update status distinguishes running and installed versions", () => {
     installedVersion: "0.4.8",
     latestVersion: "0.4.8",
     updateState: "restart-required",
+    updateSource: null,
     lastCheckedAt: null,
     restartRequired: true,
     lastUpdateError: null,
@@ -241,6 +243,19 @@ test("Cloud manifest absence falls back to an exact GitHub stable tag", async ()
   assert.equal(selected.ref, "v0.3.2");
 });
 
+test("a stale HTTP 200 Cloud manifest does not suppress a newer GitHub release", async () => {
+  const fetchImpl = async (url) => {
+    const href = String(url);
+    if (href.endsWith("/api/connector/latest")) return response(manifest("0.6.0"));
+    if (href.includes("/releases?")) return response([{ tag_name: "v0.7.9", draft: false, prerelease: false }]);
+    if (href.includes("/tags?")) return response([{ name: "v0.7.9" }]);
+    throw new Error(`unexpected URL: ${href}`);
+  };
+  const selected = await resolveUpdateCandidate({ currentVersion: "0.7.8", channel: "stable", fetchImpl });
+  assert.equal(selected.version, "0.7.9");
+  assert.equal(selected.ref, "v0.7.9");
+});
+
 test("stable GitHub fallback ignores prerelease while preview accepts it", async () => {
   const fetchImpl = githubFallback({
     releases: [
@@ -271,7 +286,7 @@ test("GitHub network failure leaves update discovery failed rather than guessing
 test("minimum Harness version rejects an incompatible runtime before install", async () => {
   let installCalls = 0;
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ onInstall: () => { installCalls += 1; } }),
@@ -286,7 +301,7 @@ test("minimum Harness version rejects an incompatible runtime before install", a
 test("untrusted installed package source is refused before replacement", async () => {
   let installCalls = 0;
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({
@@ -304,7 +319,7 @@ test("untrusted installed package source is refused before replacement", async (
 test("correct Git tag update uses official installBundle with enabled false", async () => {
   const calls = [];
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({
@@ -326,7 +341,7 @@ test("correct Git tag update uses official installBundle with enabled false", as
 test("package metadata mismatch is rejected before Plugin Manager replacement", async () => {
   let installCalls = 0;
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ onInstall: () => { installCalls += 1; } }),
@@ -343,7 +358,7 @@ test("worker busy state becomes waiting-idle and update starts only after task c
   let busy = true;
   let installedWhileBusy = null;
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({
@@ -365,7 +380,7 @@ test("worker busy state becomes waiting-idle and update starts only after task c
 
 test("Plugin Manager update failure keeps the current Connector runtime usable", async () => {
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({
@@ -388,7 +403,7 @@ test("Plugin Manager update failure keeps the current Connector runtime usable",
 
 test("bundle validation failure leaves the running Connector on the current version", async () => {
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({
@@ -410,7 +425,7 @@ test("bundle validation failure leaves the running Connector on the current vers
 
 test("official incompatibility result is surfaced without replacing runtime state", async () => {
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({
@@ -430,8 +445,7 @@ test("official incompatibility result is surfaced without replacing runtime stat
   assert.equal(status.currentVersion, CONNECTOR_VERSION);
 });
 
-test("auto-update disabled performs no network or package operation", async () => {
-  let fetchCalls = 0;
+test("manual update check remains available when auto-update is disabled and never installs", async () => {
   let packageCalls = 0;
   const runtime = createUpdateRuntime();
   const status = await performUpdateCheck({
@@ -439,11 +453,46 @@ test("auto-update disabled performs no network or package operation", async () =
     config: { autoUpdate: false, updateChannel: "stable" },
     pluginManager: pluginManager({ onInstall: () => { packageCalls += 1; } }),
     harnessVersion: "1.0.0",
-    fetchImpl: async () => { fetchCalls += 1; return response(null); },
+    fetchImpl: async (url) => String(url).endsWith("/api/connector/latest")
+      ? response(manifest("0.6.0"))
+      : String(url).includes("/releases?")
+        ? response([{ tag_name: "v0.7.11", draft: false, prerelease: false }])
+        : String(url).includes("/tags?")
+          ? response([{ name: "v0.7.11" }])
+          : response(null, 404),
   });
-  assert.equal(status.updateState, "idle");
-  assert.equal(fetchCalls, 0);
-  assert.equal(packageCalls, 0);
+  assert.equal(status.updateState, "available");
+  assert.equal(status.latestVersion, "0.7.11");
+  assert.equal(status.updateSource, "github-releases");
+  assert.ok(status.lastCheckedAt);
+  assert.equal(packageCalls, 0, "checking updates must not call the Plugin Manager");
+});
+
+test("forced update queries GitHub and reinstalls the same stable version through Plugin Manager", async () => {
+  const calls = [];
+  const runtime = createUpdateRuntime();
+  const sha = "c".repeat(40);
+  const fetchImpl = async (url) => {
+    const href = String(url);
+    assert.ok(!href.endsWith("/api/connector/latest"), "forced install must use GitHub as its source");
+    if (href.includes("/releases?")) return response([{ tag_name: `v${CONNECTOR_VERSION}`, draft: false, prerelease: false }]);
+    if (href.includes("/tags?")) return response([{ name: `v${CONNECTOR_VERSION}` }]);
+    if (href.includes("/git/ref/tags/")) return response({ ref: `refs/tags/v${CONNECTOR_VERSION}`, object: { type: "commit", sha } });
+    if (href.endsWith("/package.json")) return response({ name: CONNECTOR_PACKAGE, version: CONNECTOR_VERSION, dsh: { bundle: { patch: "./dsh.bundle.patch.yml" } } });
+    throw new Error(`unexpected URL: ${href}`);
+  };
+  const status = await performUpdateInstall({
+    runtime,
+    config: { autoUpdate: false, updateChannel: "stable" },
+    pluginManager: pluginManager({ result: { application: "restart-required", bundle: CONNECTOR_PACKAGE, version: CONNECTOR_VERSION }, onInstall: (spec, options) => calls.push({ spec, options }) }),
+    harnessVersion: "1.0.0",
+    fetchImpl,
+    forceReinstall: true,
+  });
+  assert.equal(status.updateState, "restart-required", status.lastUpdateError);
+  assert.equal(status.latestVersion, CONNECTOR_VERSION);
+  assert.equal(status.updateSource, "github-releases");
+  assert.deepEqual(calls, [{ spec: `${TRUSTED_SOURCE}#${sha}`, options: { enabled: false } }]);
 });
 
 test("update logic never mutates Credentials, pairing identity, Worker ID or Workspace authorization", async () => {
@@ -460,7 +509,7 @@ test("update logic never mutates Credentials, pairing identity, Worker ID or Wor
   const pairingIdentity = { workerId: config.workerId, pairing: "paired" };
 
   const runtime = createUpdateRuntime();
-  const status = await performUpdateCheck({
+  const status = await performUpdateInstall({
     runtime,
     config,
     pluginManager: pluginManager(),
@@ -485,7 +534,7 @@ test("maintenance gate stays closed after install and reopens after a confirmed 
   const enterMaintenance = async () => { draining = true; };
   const leaveMaintenance = () => { draining = false; };
 
-  const installed = await performUpdateCheck({
+  const installed = await performUpdateInstall({
     runtime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ onInstall: () => assert.equal(draining, true) }),
@@ -499,7 +548,7 @@ test("maintenance gate stays closed after install and reopens after a confirmed 
 
   const failedRuntime = createUpdateRuntime();
   let failureDrain = false;
-  const failed = await performUpdateCheck({
+  const failed = await performUpdateInstall({
     runtime: failedRuntime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ result: { changed: false, application: "failed", error: { code: "disk-full" } } }),
@@ -515,7 +564,7 @@ test("maintenance gate stays closed after install and reopens after a confirmed 
 test("ambiguous install and updater cancellation fail closed or safely release maintenance", async () => {
   const ambiguousRuntime = createUpdateRuntime();
   let ambiguousDrain = false;
-  const ambiguous = await performUpdateCheck({
+  const ambiguous = await performUpdateInstall({
     runtime: ambiguousRuntime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager({ result: { changed: true, application: "failed", error: { code: "host-error" } } }),
@@ -532,7 +581,7 @@ test("ambiguous install and updater cancellation fail closed or safely release m
   const controller = new AbortController();
   const cancelledRuntime = createUpdateRuntime();
   let cancelledDrain = false;
-  const pending = performUpdateCheck({
+  const pending = performUpdateInstall({
     runtime: cancelledRuntime,
     config: { autoUpdate: true, updateChannel: "stable" },
     pluginManager: pluginManager(),

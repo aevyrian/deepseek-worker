@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
 
     const contribution = {
       package: "deepseek-worker-connector",
-      descriptors: ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "openBridgeBrowser", "testBridge"].map((method) => ({
+      descriptors: ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate", "openBridgeBrowser", "testBridge"].map((method) => ({
         id: `deepseek-worker-connector#deepseekWorkerConnector/${method}`,
         service: "deepseekWorkerConnectorControl",
         namespace: "deepseekWorkerConnector",
@@ -126,6 +126,7 @@ window.__ModuleLoader__.load({
       preview: "测试版",
       updateIdle: "等待自动检查",
       updateChecking: "正在检查更新",
+      updateDownloading: "正在解析版本并验证更新包",
       updateCurrent: "已是最新版本",
       updateAvailable: "发现新版本",
       updateWaitingIdle: "等待当前任务完成",
@@ -133,6 +134,9 @@ window.__ModuleLoader__.load({
       updateRestart: "更新已安装，重启 Harness 后生效",
       updateFailed: "自动更新失败。当前版本仍可继续使用。",
       retryUpdate: "重试",
+      checkUpdates: "检查更新",
+      forceUpdate: "一键强制更新",
+      updateSource: "检查来源",
       latestVersion: "最新版本",
       lastChecked: "上次检查",
     };
@@ -209,6 +213,7 @@ window.__ModuleLoader__.load({
       preview: "preview",
       updateIdle: "Waiting for automatic check",
       updateChecking: "Checking for updates",
+      updateDownloading: "Resolving version and verifying package",
       updateCurrent: "Up to date",
       updateAvailable: "Update available",
       updateWaitingIdle: "Waiting for current task to finish",
@@ -216,6 +221,9 @@ window.__ModuleLoader__.load({
       updateRestart: "Update installed. Restart Harness to apply it.",
       updateFailed: "Automatic update failed. The current version can keep running.",
       retryUpdate: "Retry",
+      checkUpdates: "Check for updates",
+      forceUpdate: "Force update now",
+      updateSource: "Update source",
       latestVersion: "Latest version",
       lastChecked: "Last checked",
     };
@@ -624,6 +632,15 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const forceUpdate = async () => {
+        try {
+          await actions.forceUpdate();
+          await refreshStatus();
+        } catch (error) {
+          setStatusMessage(error instanceof Error ? error.message : t("updateFailed"));
+        }
+      };
+
       const openConnectionPage = () => {
         const target = connectionUrl(pairing, status, draft.endpoint.trim());
         if (!target) {
@@ -773,6 +790,7 @@ window.__ModuleLoader__.load({
 
       const updateState = status?.updateState || "idle";
       const updateDisplay = updateState === "checking" ? t("updateChecking")
+        : updateState === "downloading" ? t("updateDownloading")
         : updateState === "up-to-date" ? t("updateCurrent")
           : updateState === "available" ? t("updateAvailable")
             : updateState === "waiting-idle" ? t("updateWaitingIdle")
@@ -972,6 +990,28 @@ window.__ModuleLoader__.load({
             ),
           ),
           h(StatusLine, { label: t("updateStatus"), value: updateState, display: updateDisplay }),
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("span", null, t("latestVersion")),
+            h("strong", null, status?.latestVersion || status?.currentVersion || "0.7.0"),
+          ),
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("span", null, t("updateSource")),
+            h("span", null, status?.updateSource || "--"),
+          ),
+          h("div", { style: rowStyle },
+            h(Button, {
+              variant: "outline",
+              disabled: ["checking", "downloading", "waiting-idle", "installing"].includes(updateState),
+              onClick: () => void retryUpdate(),
+            }, t("checkUpdates")),
+            h(Button, {
+              variant: "outline",
+              disabled: status?.restartRequired || ["checking", "downloading", "waiting-idle", "installing"].includes(updateState),
+              onClick: () => void forceUpdate(),
+            }, t("forceUpdate")),
+          ),
+          status?.lastCheckedAt ? h("p", { style: mutedStyle }, `${t("lastChecked")}: ${status.lastCheckedAt}`) : null,
+          status?.lastUpdateError ? h("p", { role: "status", style: mutedStyle }, status.lastUpdateError) : null,
           status?.restartRequired
             ? h("p", { style: mutedStyle }, `↑ ${status.latestVersion || status.currentVersion || "0.7.0"} · ${t("updateRestart")}`)
             : null,
@@ -1051,16 +1091,6 @@ window.__ModuleLoader__.load({
               h("span", null, t("activeTasks")),
               h("strong", null, `${status?.activeTaskCount ?? 0} / ${status?.maxConcurrentTasks ?? 24}`),
             ),
-            h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
-              h("span", null, t("latestVersion")),
-              h("span", null, status?.latestVersion || status?.currentVersion || "0.7.0"),
-            ),
-            h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
-              h("span", null, t("lastChecked")),
-              h("span", null, status?.lastCheckedAt || "--"),
-            ),
-            status?.lastUpdateError ? h("p", { style: mutedStyle }, status.lastUpdateError) : null,
-
             h("div", { style: gridStyle },
               h(Field, { label: t("concurrency") }, h(Input, {
                 type: "number", min: 1, max: 24, value: draft.maxConcurrentTasks,
@@ -1153,6 +1183,11 @@ window.__ModuleLoader__.load({
         async checkForUpdates() {
           const response = await ctx.remote.deepseekWorkerConnector.checkForUpdates();
           if (!response.ok) throw new Error(hostRemoteFailure(response.error, "checkForUpdates"));
+          return response.value;
+        },
+        async forceUpdate() {
+          const response = await ctx.remote.deepseekWorkerConnector.forceUpdate();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "forceUpdate"));
           return response.value;
         },
         async openBridgeBrowser() {

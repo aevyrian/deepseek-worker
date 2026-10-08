@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.10 — Update Discovery and One-click Reinstall
+
+- 修复 HTTP 200 但版本过期的 Cloud 清单阻止检查 GitHub Release 的问题，并在状态中显示检查来源、版本、时间和错误原因。
+- 将手动检查更新与安装分离；Connector 界面始终提供“检查更新”和“一键强制更新”。
+- 强制更新只从受信任的 GitHub Release/Tag 解析精确 commit、核验 package metadata，再调用 Harness Plugin Manager；支持同版本重新安装，并继续经过 Worker Drain。
+- 本版本不会自动恢复 Site 端 Admission Control 暂停状态。
+
 ## 0.7.9 — Connector Stability Release
 
 - 正式发布 0.7.x 开发测试迭代中的 Chat Bridge 自动回传可靠性修复：持久化 Outbox、发送结果核验、有限指数退避及失败诊断保留。

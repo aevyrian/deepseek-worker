@@ -634,9 +634,12 @@ export class WorkerControlService extends TypertRemoteService {
     return { token: generateWorkerToken(), ref: TOKEN_REF };
   }
 
-  checkForUpdates() {
-    void this.updater.requestCheck({ force: true });
-    return publicUpdateStatus(this.runtime);
+  async checkForUpdates() {
+    return this.updater.requestCheck();
+  }
+
+  async forceUpdate() {
+    return this.updater.requestInstall({ forceReinstall: true });
   }
 
   async openBridgeBrowser() {
@@ -760,7 +763,7 @@ function markRemoteMethod(prototype, methodName) {
   for (const initializer of initializers) initializer.call(receiver);
 }
 
-for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "openBridgeBrowser", "testBridge"]) {
+for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate", "openBridgeBrowser", "testBridge"]) {
   markRemoteMethod(WorkerControlService.prototype, method);
 }
 

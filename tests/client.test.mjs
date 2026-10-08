@@ -60,6 +60,9 @@ function goodRemoteNamespace() {
         },
       };
     },
+    async forceUpdate() {
+      return { ok: true, value: { updateState: "restart-required", restartRequired: true } };
+    },
     async openBridgeBrowser() { return { ok: true, value: { ok: true, bound: true, state: "idle" } }; },
     async testBridge() { return { ok: true, value: { ok: true, bound: true, state: "idle" } }; },
   };
@@ -115,7 +118,7 @@ async function mountClient({
         assert.equal(contribution.package, "deepseek-worker-connector");
         assert.deepEqual(
           Array.from(contribution.descriptors, (descriptor) => descriptor.method),
-          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "openBridgeBrowser", "testBridge"],
+          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate", "openBridgeBrowser", "testBridge"],
         );
         mounted = true;
         return async () => { remoteDisposed = true; mounted = false; };
@@ -161,6 +164,7 @@ test("Client mounts all Connector Remotes and keeps manual Token compatibility",
   assert.equal((await mounted.actions.pairingStatus()).state, "pending");
   assert.equal((await mounted.actions.disconnectPairing()).state, "unpaired");
   assert.equal((await mounted.actions.checkForUpdates()).updateState, "up-to-date");
+  assert.equal((await mounted.actions.forceUpdate()).updateState, "restart-required");
   assert.equal((await mounted.actions.openBridgeBrowser()).ok, true);
   assert.equal((await mounted.actions.testBridge()).ok, true);
   assert.equal((await mounted.actions.describeCredential()).configured, true);
@@ -267,7 +271,7 @@ test("Bridge validation failures are visible and never invoke the remote action"
 test("Host Remote failures remain actionable for pairing methods", async () => {
   const leaked = "do-not-display-this-server-text";
   const failing = {};
-  for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates"]) {
+  for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate"]) {
     failing[method] = async () => ({
       ok: false,
       error: { code: "gateway/service-unavailable", message: leaked },
@@ -283,6 +287,7 @@ test("Host Remote failures remain actionable for pairing methods", async () => {
     ["pairingStatus", () => mounted.actions.pairingStatus()],
     ["disconnectPairing", () => mounted.actions.disconnectPairing()],
     ["checkForUpdates", () => mounted.actions.checkForUpdates()],
+    ["forceUpdate", () => mounted.actions.forceUpdate()],
   ]) {
     const error = await invoke().catch((value) => value);
     assert.match(error.message, new RegExp(`Host Remote 不可用.*${name}`));
@@ -471,6 +476,9 @@ test("normal UI exposes simple automatic update status while package details sta
 test("Browser update controls never receive Credential values or package-manager commands", async () => {
   const { source } = await loadClientPlugin();
   assert.match(source, /checkForUpdates/);
+  assert.match(source, /一键强制更新/);
+  assert.match(source, /t\("checkUpdates"\)/);
+  assert.match(source, /t\("forceUpdate"\)/);
   assert.doesNotMatch(source, /installBundle/);
   assert.doesNotMatch(source, /LOCAL_WORKER_TOKEN.*update/);
 });
