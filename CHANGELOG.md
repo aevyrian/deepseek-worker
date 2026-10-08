@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.11 — Durable Chat Bridge Recovery
+
+- Reconcile uncertain deliveries on a persisted exponential schedule, with a durable short lease to prevent concurrent checks and bounded manual-review reporting.
+- Preserve message identity and wake target while extending existing Outbox records in place; legacy Outbox rows remain readable and recoverable after restart.
+- Confirmed sent messages transition to delivered and Cloud acknowledgements retry independently without resending.
+- Only an explicit, matching message key in a ready composer permits one bounded safe-draft retry; missing or unreadable message state remains uncertain.
+- Store sanitized phase diagnostics for target lookup, frame validation, page confirmation, submission state, and Cloud acknowledgement.
+
 ## 0.7.10 — Update Discovery and One-click Reinstall
 
 - 修复 HTTP 200 但版本过期的 Cloud 清单阻止检查 GitHub Release 的问题，并在状态中显示检查来源、版本、时间和错误原因。

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -151,13 +151,16 @@ test("Windows outbox recovery restores backup only when canonical file is absent
   const pending = await recovered.listPending();
   assert.equal(pending.length, 1);
   assert.equal(pending[0].task_id, "task-a");
-  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), canonical);
+  const restoredCanonical = JSON.parse(await readFile(filePath, "utf8"));
+  assert.equal(restoredCanonical.deliveries[0].message_key, canonical.deliveries[0].message_key);
+  assert.equal(restoredCanonical.deliveries[0].task_id, canonical.deliveries[0].task_id);
 
   const newer = new BridgeWakeOutbox({ filePath, platform: "win32" });
   await newer.enqueueLocal({ projectId: "project-a", taskId: "task-b", terminalState: "failed" });
   await (await import("node:fs/promises")).writeFile(backup, JSON.stringify({ version: 1, deliveries: [] }));
   const preferredCanonical = new BridgeWakeOutbox({ filePath, platform: "win32" });
   assert.equal((await preferredCanonical.listPending()).length, 2);
+  assert.equal(JSON.parse(await readFile(filePath, "utf8")).deliveries.length, 2, "canonical records remain preferred after schema normalization");
 });
 
 test("formal Cloud delivery supersedes an unsent local wake for the same terminal task", async (t) => {
@@ -210,6 +213,57 @@ test("Cloud delivery recovery preserves its own wake_target and target conflicts
   const recovered = new BridgeWakeOutbox({ filePath });
   assert.equal((await recovered.findByMessageKey("cloud-targeted")).wake_target.url, target.url);
   await assert.rejects(recovered.adoptCloudDelivery({ ...envelope, wakeTarget: { ...target, url: "https://chatgpt.com/c/other" } }), /bridge_wake_target_conflict/u);
+});
+
+test("legacy uncertain Cloud rows acquire durable reconciliation fields without changing identity", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  let now = "2026-10-08T00:00:00.000Z";
+  const legacy = {
+    version: 1,
+    deliveries: [{
+      message_key: "legacy-message-key", project_id: "legacy-project", task_id: "legacy-task", terminal_state: "completed",
+      created_at: "2026-10-07T00:00:00.000Z", delivery_state: "uncertain", attempts: 2, recovery_attempts: 0,
+      send_state: "uncertain", last_error: "process_restarted_during_send", source: "cloud", delivery_id: "legacy-delivery",
+      event_id: "legacy-event", event_name: "task.completed", project_revision: 3, wake_target: { type: "chatgpt_conversation", url: "https://chatgpt.com/c/original" },
+    }],
+  };
+  await writeFile(filePath, JSON.stringify(legacy), "utf8");
+  const outbox = new BridgeWakeOutbox({ filePath, now: () => now, reconcileBaseMs: 1000, reconcileMaxMs: 4000, manualReviewThreshold: 1 });
+  const [row] = await outbox.listUncertain();
+  assert.equal(row.message_key, "legacy-message-key");
+  assert.equal(row.wake_target.url, "https://chatgpt.com/c/original");
+  assert.equal(row.reconcile_attempts, 0);
+  assert.equal(row.next_reconcile_at, null);
+  assert.equal(row.cloud_ack_state, "pending");
+  const updated = await outbox.recordReconciliation(row.message_key, { stage: "page_confirmation", reason: "token=secret https://chatgpt.com/c/private-id C:\\Users\\Alice\\state.json" });
+  assert.equal(updated.reconcile_attempts, 1);
+  assert.equal(updated.reconcile_manual_intervention, true);
+  assert.doesNotMatch(updated.last_reconcile_error, /secret|Alice|state\.json|private-id/iu);
+  assert.equal(updated.next_reconcile_at, "2026-10-08T00:00:01.000Z");
+  const persisted = JSON.parse(await readFile(filePath, "utf8")).deliveries[0];
+  assert.equal(persisted.message_key, "legacy-message-key");
+  assert.equal(persisted.delivery_id, "legacy-delivery");
+  assert.equal(persisted.event_id, "legacy-event");
+  assert.equal(persisted.wake_target.url, "https://chatgpt.com/c/original");
+
+  now = persisted.next_reconcile_at;
+  const restarted = new BridgeWakeOutbox({ filePath, now: () => now });
+  assert.equal((await restarted.listUncertain()).length, 1, "the legacy record survives the in-place format extension");
+});
+
+test("reconciliation lock survives restart until its bounded lease expires", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  let now = "2026-10-08T00:00:00.000Z";
+  const first = new BridgeWakeOutbox({ filePath, now: () => now, reconcileLockMs: 1000 });
+  const queued = await first.enqueueLocal({ projectId: "project-lock", taskId: "task-lock", terminalState: "completed" });
+  await first.beginAttempt(queued.message_key);
+  await first.markFailed(queued.message_key, Object.assign(new Error("uncertain"), { code: "bridge_send_uncertain" }));
+  const [uncertain] = await first.listUncertain();
+  assert.ok(await first.beginReconciliation(uncertain.message_key));
+  const restarted = new BridgeWakeOutbox({ filePath, now: () => now, reconcileLockMs: 1000 });
+  assert.equal((await restarted.listUncertain()).length, 0, "restart does not immediately duplicate an in-flight check");
+  now = "2026-10-08T00:00:01.000Z";
+  assert.equal((await restarted.listUncertain()).length, 1, "an interrupted check becomes eligible after its lock lease");
 });
 
 test("Cloud recovery enriches the same targetless failed Outbox row without resetting identity or diagnostics", async (t) => {

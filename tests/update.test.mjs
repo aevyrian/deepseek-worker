@@ -456,13 +456,13 @@ test("manual update check remains available when auto-update is disabled and nev
     fetchImpl: async (url) => String(url).endsWith("/api/connector/latest")
       ? response(manifest("0.6.0"))
       : String(url).includes("/releases?")
-        ? response([{ tag_name: "v0.7.11", draft: false, prerelease: false }])
+        ? response([{ tag_name: "v0.7.12", draft: false, prerelease: false }])
         : String(url).includes("/tags?")
-          ? response([{ name: "v0.7.11" }])
+          ? response([{ name: "v0.7.12" }])
           : response(null, 404),
   });
   assert.equal(status.updateState, "available");
-  assert.equal(status.latestVersion, "0.7.11");
+  assert.equal(status.latestVersion, "0.7.12");
   assert.equal(status.updateSource, "github-releases");
   assert.ok(status.lastCheckedAt);
   assert.equal(packageCalls, 0, "checking updates must not call the Plugin Manager");

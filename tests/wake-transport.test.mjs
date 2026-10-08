@@ -165,17 +165,22 @@ test("transport keeps failed sends pending with sanitized errors and retries", a
   assert.equal(delivered.last_failure, failed.last_failure, "successful retry keeps the sanitized failure evidence");
 });
 
-test("interrupted send is reconciled as delivered before any resend", async (t) => {
+test("interrupted send is reconciled as delivered and Cloud ACK is durably recorded", async (t) => {
   const { filePath } = await makeOutbox(t);
   const firstProcess = new BridgeWakeOutbox({ filePath });
-  const queued = await firstProcess.enqueueLocal({ projectId: "project-1", taskId: "task-visible", terminalState: "completed" });
+  const queued = (await firstProcess.adoptCloudDelivery({
+    deliveryId: "delivery-visible", messageKey: "message-visible", projectId: "project-1", taskId: "task-visible",
+    eventId: "event-visible", eventName: "task.completed", revision: 1,
+  })).row;
   await firstProcess.beginAttempt(queued.message_key);
 
   const restartedOutbox = new BridgeWakeOutbox({ filePath });
   let reconcileCalls = 0;
   let bridgeCalls = 0;
+  const acknowledgements = [];
   const transport = new WakeTransport({
     outbox: restartedOutbox,
+    acknowledgeDelivery: async (delivery) => acknowledgements.push(delivery),
     bridge: { async reconcileDelivery(delivery) {
       reconcileCalls += 1;
       bridgeCalls += 1;
@@ -186,7 +191,10 @@ test("interrupted send is reconciled as delivered before any resend", async (t) 
   assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 1 });
   assert.equal(reconcileCalls, 1);
   assert.equal(bridgeCalls, 1);
+  assert.equal(acknowledgements.length, 1);
+  assert.equal(acknowledgements[0].delivery_id, "delivery-visible");
   assert.equal((await restartedOutbox.findByMessageKey(queued.message_key)).delivery_state, "delivered");
+  assert.equal((await restartedOutbox.findByMessageKey(queued.message_key)).cloud_ack_state, "acked");
   assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 0 });
   assert.equal(reconcileCalls, 1, "uncertain delivery is checked at most once per process");
 });
@@ -214,12 +222,13 @@ test("a confirmed safe draft receives one bounded recovery attempt", async (t) =
   assert.equal(sendCalls, 1);
 });
 
-test("an uncertain delivery that cannot be reconciled stays quarantined without resend", async (t) => {
+test("an uncertain delivery is repeatedly reconciled with durable backoff and never blindly resent", async (t) => {
   const { filePath } = await makeOutbox(t);
-  const first = new BridgeWakeOutbox({ filePath });
+  let now = "2026-10-08T00:00:00.000Z";
+  const first = new BridgeWakeOutbox({ filePath, now: () => now, reconcileBaseMs: 1000, reconcileMaxMs: 4000 });
   const queued = await first.enqueueLocal({ projectId: "project-1", taskId: "task-unknown", terminalState: "completed" });
   await first.beginAttempt(queued.message_key);
-  const restarted = new BridgeWakeOutbox({ filePath });
+  const restarted = new BridgeWakeOutbox({ filePath, now: () => now, reconcileBaseMs: 1000, reconcileMaxMs: 4000 });
   let reconcileCalls = 0;
   let sendCalls = 0;
   const transport = new WakeTransport({
@@ -234,7 +243,81 @@ test("an uncertain delivery that cannot be reconciled stays quarantined without 
   assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 0 });
   assert.equal(reconcileCalls, 1);
   assert.equal(sendCalls, 0);
-  assert.equal((await restarted.findByMessageKey(queued.message_key)).delivery_state, "uncertain");
+  let uncertain = await restarted.findByMessageKey(queued.message_key);
+  assert.equal(uncertain.delivery_state, "uncertain");
+  assert.equal(uncertain.reconcile_attempts, 1);
+  assert.equal(uncertain.next_reconcile_at, "2026-10-08T00:00:01.000Z");
+  assert.equal(uncertain.reconcile_diagnostic.reason, "stale_stop_control");
+  now = uncertain.next_reconcile_at;
+  await transport.drainOnce();
+  assert.equal(reconcileCalls, 2, "the same process retries once the persisted schedule is due");
+  assert.equal(sendCalls, 0);
+  uncertain = await restarted.findByMessageKey(queued.message_key);
+  assert.equal(uncertain.reconcile_attempts, 2);
+  const afterRestart = new BridgeWakeOutbox({ filePath, now: () => now, reconcileBaseMs: 1000, reconcileMaxMs: 4000 });
+  assert.equal((await afterRestart.listUncertain()).length, 0, "a new process honors the persisted next_reconcile_at");
+});
+
+test("a delivered Cloud message retries only its failed ACK after restart", async (t) => {
+  const { filePath } = await makeOutbox(t);
+  let now = "2026-10-08T00:00:00.000Z";
+  const outbox = new BridgeWakeOutbox({ filePath, now: () => now, retryBaseMs: 1000, retryMaxMs: 4000 });
+  const adopted = await outbox.adoptCloudDelivery({
+    deliveryId: "delivery-ack-retry", messageKey: "message-ack-retry", projectId: "project-1", taskId: "task-ack-retry",
+    eventId: "event-ack-retry", eventName: "task.completed", revision: 1,
+  });
+  await outbox.beginAttempt(adopted.row.message_key);
+  await outbox.markFailed(adopted.row.message_key, Object.assign(new Error("unknown submit"), { code: "bridge_send_uncertain" }));
+  const recovered = new BridgeWakeOutbox({ filePath, now: () => now, retryBaseMs: 1000, retryMaxMs: 4000 });
+  let reconcileCalls = 0;
+  let ackCalls = 0;
+  let sends = 0;
+  const transport = new WakeTransport({
+    outbox: recovered,
+    bridge: {
+      async reconcileDelivery() { reconcileCalls += 1; return { state: "delivered", stage: "page_confirmation" }; },
+      async sendEnvelope() { sends += 1; },
+    },
+    acknowledgeDelivery: async () => { ackCalls += 1; if (ackCalls === 1) throw new Error("token=hidden C:\\private\\auth.json"); },
+    logger: { warn() {} },
+  });
+  await transport.drainOnce();
+  let row = await recovered.findByMessageKey("message-ack-retry");
+  assert.equal(row.delivery_state, "delivered");
+  assert.equal(row.cloud_ack_state, "pending");
+  assert.equal(row.cloud_ack_attempts, 1);
+  assert.doesNotMatch(row.cloud_ack_last_error, /hidden|private|auth\.json/iu);
+  now = row.cloud_ack_next_attempt_at;
+  await transport.drainOnce();
+  row = await recovered.findByMessageKey("message-ack-retry");
+  assert.equal(row.cloud_ack_state, "acked");
+  assert.equal(row.cloud_ack_attempts, 2);
+  assert.equal(reconcileCalls, 1, "ACK recovery does not revisit the send path");
+  assert.equal(sends, 0, "a delivered message is never resent while ACK retries");
+});
+
+test("concurrent transport instances share the durable reconciliation lock", async (t) => {
+  const { filePath } = await makeOutbox(t);
+  const first = new BridgeWakeOutbox({ filePath });
+  const queued = await first.enqueueLocal({ projectId: "project-1", taskId: "task-concurrent-reconcile", terminalState: "completed" });
+  await first.beginAttempt(queued.message_key);
+  const outbox = new BridgeWakeOutbox({ filePath });
+  let calls = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const options = {
+    outbox,
+    bridge: { async reconcileDelivery() { calls += 1; await gate; return { state: "uncertain", reason: "page_unavailable" }; } },
+    logger: { warn() {} },
+  };
+  const transportA = new WakeTransport(options);
+  const transportB = new WakeTransport(options);
+  const firstDrain = transportA.drainOnce();
+  const secondDrain = transportB.drainOnce();
+  release();
+  await Promise.all([firstDrain, secondDrain]);
+  assert.equal(calls, 1);
+  assert.equal((await outbox.findByMessageKey(queued.message_key)).delivery_state, "uncertain");
 });
 
 test("transport run resumes pending work, responds to kicks and stops on abort", async (t) => {

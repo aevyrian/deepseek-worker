@@ -154,6 +154,8 @@ function fakeCdp({
   mouseClickWorks = true,
   enterSends = true,
   submissionPendingAfterClick = false,
+  composerDraftHasMessageKey = false,
+  reconciledMessageVisible = false,
 } = {}) {
   const calls = [];
   const pendingSpaUrls = [...spaUrls];
@@ -218,8 +220,8 @@ function fakeCdp({
           const authRequired = login || composerChecks >= loginAfterComposerChecks;
           return { result: { value: { href: authRequired ? "https://chatgpt.com/auth/login" : href, authRequired } } };
         }
-        if (params.expression.includes("messages.some")) return { result: { value: messageSubmitted } };
-        if (params.expression.includes("composerHasMessageKey")) return { result: { value: { composerFound: true, composerHasMessageKey: messageInserted && !messageSubmitted, composerEmpty: !messageInserted || messageSubmitted, sendEnabled: messageInserted && !messageSubmitted && !(clickReleased && submissionPendingAfterClick), submitting: clickReleased && submissionPendingAfterClick } } };
+        if (params.expression.includes("messages.some")) return { result: { value: messageSubmitted || reconciledMessageVisible } };
+        if (params.expression.includes("composerHasMessageKey")) return { result: { value: { composerFound: true, composerHasMessageKey: (messageInserted && !messageSubmitted) || composerDraftHasMessageKey, composerEmpty: (!messageInserted && !composerDraftHasMessageKey) || messageSubmitted, sendEnabled: ((messageInserted && !messageSubmitted) || composerDraftHasMessageKey) && !(clickReleased && submissionPendingAfterClick), submitting: clickReleased && submissionPendingAfterClick, staleStopControl: false, visibleErrors: 0 } } };
         if (params.expression.includes("'MESSAGE_KEY: '")) return { result: { value: { ok: messageInserted && !messageSubmitted } } };
         if (params.expression.includes("composer_not_found")) {
           composerChecks += 1;
@@ -635,8 +637,41 @@ test("reconcileDelivery refuses to reconcile against the fixed binding without t
   const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
   const delivery = { project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1" };
-  assert.deepEqual(await controller.reconcileDelivery(delivery), { state: "uncertain", reason: "target_unbound" });
+  assert.deepEqual(await controller.reconcileDelivery(delivery), { state: "uncertain", stage: "target_location", reason: "target_unbound", diagnostic: {} });
   assert.equal(fake.calls.length, 0);
+});
+
+test("reconciliation only calls a draft safe when the exact message remains in a ready composer", async () => {
+  const ambiguous = fakeCdp({ pageUrl: "https://chatgpt.com/c/bound" });
+  const ambiguousController = fakeController(ambiguous);
+  ambiguousController.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const delivery = { project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1", legacy_binding: true };
+  const unknown = await ambiguousController.reconcileDelivery(delivery);
+  assert.equal(unknown.state, "uncertain", "absence from message nodes alone is not proof of non-submission");
+  assert.equal(unknown.diagnostic.composerHasMessageKey, false);
+  assert.ok(!ambiguous.calls.some(([method]) => method.startsWith("Input.")));
+
+  const safe = fakeCdp({ pageUrl: "https://chatgpt.com/c/bound", composerDraftHasMessageKey: true });
+  const safeController = fakeController(safe);
+  safeController.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const safeResult = await safeController.reconcileDelivery(delivery);
+  assert.equal(safeResult.state, "safe_draft");
+  assert.equal(safeResult.diagnostic.composerHasMessageKey, true);
+  assert.equal(safeResult.diagnostic.sendEnabled, true);
+  assert.ok(!safe.calls.some(([method]) => method.startsWith("Input.")), "reconciliation is read-only and never submits on its own");
+});
+
+test("reconciliation confirms only the matching sent message in the conversation region", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/bound", reconciledMessageVisible: true });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.reconcileDelivery({
+    project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1", legacy_binding: true,
+  });
+  assert.equal(result.state, "delivered");
+  assert.equal(result.stage, "page_confirmation");
+  assert.equal(result.diagnostic.messageVisible, true);
+  assert.ok(!JSON.stringify(result).includes("PROJECT_ID"), "diagnostics do not contain message text");
 });
 
 test("Site deliveries flow through the durable outbox and transport into each delivery's own conversation", async (t) => {
