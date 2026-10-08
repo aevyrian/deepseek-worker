@@ -211,3 +211,27 @@ test("Cloud delivery recovery preserves its own wake_target and target conflicts
   assert.equal((await recovered.findByMessageKey("cloud-targeted")).wake_target.url, target.url);
   await assert.rejects(recovered.adoptCloudDelivery({ ...envelope, wakeTarget: { ...target, url: "https://chatgpt.com/c/other" } }), /bridge_wake_target_conflict/u);
 });
+
+test("Cloud recovery enriches the same targetless failed Outbox row without resetting identity or diagnostics", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  const target = { type: "chatgpt_conversation", url: "https://chatgpt.com/c/original-project-chat", source: "site_project_binding" };
+  const envelope = { messageKey: "bridge-original-message", projectId: "project-original", taskId: "task-original", eventName: "task.completed", deliveryId: "delivery-original", eventId: "event-original", revision: 19 };
+  const first = new BridgeWakeOutbox({ filePath });
+  await first.adoptCloudDelivery(envelope);
+  await first.beginAttempt(envelope.messageKey);
+  await first.markFailed(envelope.messageKey, new Error("Chat Bridge has no wake target for this delivery"));
+
+  const restarted = new BridgeWakeOutbox({ filePath });
+  const before = await restarted.findByMessageKey(envelope.messageKey);
+  const enriched = await restarted.adoptCloudDelivery({ ...envelope, wakeTarget: target });
+  assert.equal(enriched.row.message_key, envelope.messageKey);
+  assert.equal(enriched.row.delivery_id, envelope.deliveryId);
+  assert.equal(enriched.row.event_id, envelope.eventId);
+  assert.equal(enriched.row.project_revision, envelope.revision);
+  assert.equal(enriched.row.wake_target.url, target.url);
+  assert.equal(enriched.row.attempts, before.attempts);
+  assert.equal(enriched.row.last_error, before.last_error);
+  assert.equal(enriched.row.last_failure, before.last_failure);
+  assert.equal(enriched.row.next_attempt_at, before.next_attempt_at);
+  assert.equal(enriched.row.delivery_state, before.delivery_state);
+});
