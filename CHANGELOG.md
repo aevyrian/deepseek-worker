@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.9 — Connector Stability Release
+
+- 正式发布 0.7.x 开发测试迭代中的 Chat Bridge 自动回传可靠性修复：持久化 Outbox、发送结果核验、有限指数退避及失败诊断保留。
+- 增加安全 Worker Claim Drain 与运行时 Build Hash 报告。
+- 支持消费 Site 显式提供的 delivery wake target；本版本不提供原始 ChatGPT 对话来源的自动识别。
+
 ## 0.7.9-beta.1 — Stability Test Release
 
 - Adds durable Chat Bridge delivery recovery with bounded exponential retry backoff and retained failure diagnostics.
