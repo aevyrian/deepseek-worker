@@ -252,7 +252,7 @@ function fakeCdp({
   runtimeErrors = [],
   runtimeError,
   scriptException = false,
-  sendControl = { buttonCount: 1, selectorMatches: { 'button[data-testid="send-button"]': 1 }, candidates: [], chosen: { selector: 'button[data-testid="send-button"]', x: 420, y: 700, metadata: { tagName: "BUTTON", dataTestId: "send-button", disabled: false, visible: true, nearComposer: true, hitMatchesButton: true } } },
+  sendControl = { buttonCount: 1, selectorMatches: { 'button[data-testid="send-button"]': 1 }, candidates: [], chosen: { selector: 'button[data-testid="send-button"]', x: 420, y: 700, metadata: { tagName: "BUTTON", dataTestId: "send-button", disabled: false, visible: true, nearComposer: true, hitMatchesButton: true, isSendControl: true } } },
   sendControlSequence = [],
   composerDraftSequence = [],
   composerForeignDraft = false,
@@ -806,7 +806,7 @@ test("sendMessage waits out a slow hydration instead of falling back to a blind 
   ], chosen: null });
   const readyControl = { buttonCount: 2, composerFound: true, composerRect: { x: 200, y: 700, width: 600, height: 80 }, selectorMatches: { 'button[data-testid="send-button"]': 1 }, candidates: [
     { tagName: "BUTTON", dataTestId: "send-button", ariaLabel: "发送消息", disabled: false, visible: true, nearComposer: true, hitMatchesButton: true, isSendControl: true },
-  ], chosen: { selector: 'button[data-testid="send-button"]', x: 420, y: 700, metadata: { tagName: "BUTTON", dataTestId: "send-button", disabled: false, hitMatchesButton: true } } };
+  ], chosen: { selector: 'button[data-testid="send-button"]', x: 420, y: 700, metadata: { tagName: "BUTTON", dataTestId: "send-button", disabled: false, hitMatchesButton: true, isSendControl: true } } };
   const fake = fakeCdp({ sendControlSequence: [...Array(22).keys()].map((tick) => hydrating(tick)).concat([readyControl]) });
   const controller = fakeController(fake);
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
@@ -1619,4 +1619,17 @@ test("message visibility rejects assistant echoes and accepts an explicit user b
   const userBubble = { textContent };
   assert.equal(runInNewContext(expression, { document: { querySelectorAll: selector => selector.includes('[data-message-author-role="user"]') ? [userBubble] : [] } }), true);
   assert.doesNotMatch(expression, /conversation-turn-/u);
+});
+
+
+test("message visibility matches complete marker values and rejects every identity prefix", () => {
+  const expression = messageVisibleScript("project.a", "task+1", "key[1]");
+  const observe = textContent => runInNewContext(expression, { document: { querySelectorAll: () => [{ textContent }] } });
+  assert.equal(observe("PROJECT_ID: project.a\nTASK_ID: task+1\nMESSAGE_KEY: key[1]"), true);
+  for (const text of [
+    "PROJECT_ID: project.abc\nTASK_ID: task+1\nMESSAGE_KEY: key[1]",
+    "PROJECT_ID: project.a\nTASK_ID: task+12\nMESSAGE_KEY: key[1]",
+    "PROJECT_ID: project.a\nTASK_ID: task+1\nMESSAGE_KEY: key[1]longer",
+    "NOT_PROJECT_ID: project.a\nTASK_ID: task+1\nMESSAGE_KEY: key[1]",
+  ]) assert.equal(observe(text), false);
 });

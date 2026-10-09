@@ -195,10 +195,10 @@ class FakeCdp {
       distance: 12,
       forbidden: false,
       isSendControl: true,
-      hitMatchesButton: true,
+      hitMatchesButton: page.sendCenterUnobstructed !== false,
     };
     const chosen = page.sendControlEligible
-      ? { selector: 'button[data-testid="send-button"]', x: 378, y: 618, metadata }
+      ? { selector: 'button[data-testid="send-button"]', x: page.sendX ?? 378, y: page.sendY ?? 618, metadata }
       : null;
     return {
       buttonCount: 1,
@@ -1327,5 +1327,38 @@ test("[concurrency] separate controllers sharing one browser port cannot mix con
     assert.equal(messages.length, 2);
     assert.equal(messages[0].includes("MESSAGE_KEY: mk-controller-two"), false);
     assert.equal(messages[1].includes("MESSAGE_KEY: mk-controller-one"), false);
+  } finally { await harness.close(); }
+});
+
+
+test("[control-refresh] durable persistence moving the button uses the new safe coordinates", async () => {
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }] });
+  try {
+    const result = await harness.controller.sendEnvelope(envelope({ key: "mk-control-moved", target: conversation(URL_A) }), {
+      onProgress: async stage => {
+        if (stage === "submit_attempted") {
+          harness.page("tab-A").sendX = 512;
+          harness.page("tab-A").sendY = 712;
+        }
+      },
+    });
+    assert.equal(result.ok, true);
+    const clicks = callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent");
+    assert.equal(clicks.length, 3);
+    assert.equal(clicks.every(c => c.params.x === 512 && c.params.y === 712), true);
+  } finally { await harness.close(); }
+});
+
+test("[control-refresh] durable persistence obstructing the button prevents every click", async () => {
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }] });
+  try {
+    await assert.rejects(harness.controller.sendEnvelope(envelope({ key: "mk-control-obstructed", target: conversation(URL_A) }), {
+      onProgress: async stage => {
+        if (stage === "submit_attempted") harness.page("tab-A").sendCenterUnobstructed = false;
+      },
+    }), e => e.code === "bridge_send_not_submitted");
+    assert.deepEqual(callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent"), []);
+    assert.equal(harness.page("tab-A").visibleMessages.length, 0);
+    assert.equal(harness.page("tab-A").composerText.includes("MESSAGE_KEY: mk-control-obstructed"), true);
   } finally { await harness.close(); }
 });
