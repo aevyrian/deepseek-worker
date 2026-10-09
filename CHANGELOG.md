@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — Chat Bridge Submit Reliability
+
+- Align send and reconcile on one conversation identity: trailing slashes, harmless query parameters, a `www.` host and the `/g/<project>/c/<id>` spelling of the same conversation id all resolve to the same target, while a different conversation id, the home page, an auth page and non-HTTPS URLs fail closed. `reconcileDelivery` no longer reports `target_missing` for a tab that is open under a cosmetic URL variant.
+- Keep `wake_target` above the global `chatBridgeChatUrl` in both paths, and keep reconciliation strictly read-only: it never navigates, never inserts, never clicks, never opens a tab to search, and stops with an explicit reason instead of risking the current draft.
+- Fix the send-control `disabled` test: the previous `||`/`&&` precedence reported a disabled `data-testid="send-button"` as enabled, and the anchored label list missed the real `发送消息` label. A control now counts as the send control only when it is visible, enabled, near the composer, not a stop/voice/attach/dictate/share control, and its label really names the send action.
+- Remove the blind Enter fallback. When no safe clickable control appears, the verified draft is retained and reported instead of being submitted through an unverified key event; a draft dropped by a hydration re-render is re-inserted at most three times before anything is submitted.
+- Wait for page hydration and a stable toolbar (up to 15s, three identical reads) before clicking, never click while the conversation is still generating or a stale Stop control is on screen, and extend post-click confirmation to 6s. A confirmation timeout still holds the `MESSAGE_KEY` for read-only reconciliation and never submits twice.
+- Enrich delivery diagnostics with draft retention, draft insertions, send-control presence and enabled state, submit attempt, conversation visibility and manual-intervention flags, and persist the reconcile-side fields without a database migration.
+- Add regression coverage for label-only and disabled real DOM send buttons, slow hydration, dropped-draft re-insertion, in-progress generation, lookalike `Send feedback` controls, `target_missing` plus URL variants, wrong-chat fail-closed targeting, `wake_target` precedence, single bounded safe-draft recovery, non-retained drafts and confirmation-timeout holds.
+
 ## 0.7.12 — Trusted Self-Update Source Recovery
 
 - Read the installed Git source from the active profile held by the official Harness Plugin Manager; `listBundles()` does not expose a source field.

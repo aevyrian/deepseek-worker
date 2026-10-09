@@ -109,7 +109,9 @@ test("local Project terminal response flows through the durable outbox, transpor
     assert.equal(pending.task_id, "task-local");
     assert.equal(pending.event_id, "event-project-task");
 
-    for (let index = 0; index < 50 && (sent.length === 0 || acknowledgements.length === 0); index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    // Generous budget: the transport loop is a real timer loop and the suite runs
+    // test files in parallel, so a short poll window turns into a scheduling flake.
+    for (let index = 0; index < 300 && (sent.length === 0 || acknowledgements.length === 0); index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(sent.length, 1, "transport kick should send the adopted delivery");
     assert.equal(acknowledgements.length, 1);
     assert.equal(acknowledgements[0].delivery_id, bridgeDelivery.delivery_id);
@@ -331,11 +333,11 @@ test("transport run resumes pending work, responds to kicks and stops on abort",
   });
   await outbox.enqueueLocal({ projectId: "project-1", taskId: "task-startup", terminalState: "completed" });
   const running = transport.run(controller.signal);
-  for (let index = 0; index < 30 && sends === 0; index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  for (let index = 0; index < 300 && sends === 0; index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(sends, 1, "startup scan should resume a pending wake");
   await outbox.enqueueLocal({ projectId: "project-1", taskId: "task-kick", terminalState: "failed" });
   transport.kick();
-  for (let index = 0; index < 30 && sends < 2; index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  for (let index = 0; index < 300 && sends < 2; index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(sends, 2, "kick should prompt a pending wake");
   controller.abort();
   await running;

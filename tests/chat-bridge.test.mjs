@@ -223,6 +223,9 @@ function fakeCdp({
   runtimeError,
   scriptException = false,
   sendControl = { buttonCount: 1, selectorMatches: { 'button[data-testid="send-button"]': 1 }, candidates: [], chosen: { selector: 'button[data-testid="send-button"]', x: 420, y: 700, metadata: { tagName: "BUTTON", dataTestId: "send-button", disabled: false, visible: true, nearComposer: true, hitMatchesButton: true } } },
+  sendControlSequence = [],
+  composerDraftSequence = [],
+  generatingProbes = 0,
   mouseClickWorks = true,
   enterSends = true,
   submissionPendingAfterClick = false,
@@ -234,6 +237,8 @@ function fakeCdp({
   const pendingRuntimeErrors = [...runtimeErrors];
   const pendingComposerSequence = [...composerSequence];
   const pendingComposerHrefSequence = [...composerHrefSequence];
+  const pendingSendControlSequence = [...sendControlSequence];
+  const pendingComposerDraftSequence = [...composerDraftSequence];
   const targetInfos = targets ?? [{ targetId: "chat", type: "page", url: pageUrl }];
   const targetUrls = new Map(targetInfos.map((target) => [target.targetId, target.url]));
   let activeTargetId = targetInfos[0]?.targetId ?? null;
@@ -243,6 +248,7 @@ function fakeCdp({
   let messageInserted = false;
   let messageSubmitted = false;
   let clickReleased = false;
+  let generatingProbesLeft = generatingProbes;
   const cdp = {
     async open() { calls.push(["open"]); },
     close() {},
@@ -293,8 +299,15 @@ function fakeCdp({
           return { result: { value: { href: authRequired ? "https://chatgpt.com/auth/login" : href, authRequired } } };
         }
         if (params.expression.includes("messages.some")) return { result: { value: messageSubmitted || reconciledMessageVisible } };
-        if (params.expression.includes("composerHasMessageKey")) return { result: { value: { composerFound: true, composerHasMessageKey: (messageInserted && !messageSubmitted) || composerDraftHasMessageKey, composerEmpty: (!messageInserted && !composerDraftHasMessageKey) || messageSubmitted, sendEnabled: ((messageInserted && !messageSubmitted) || composerDraftHasMessageKey) && !(clickReleased && submissionPendingAfterClick), submitting: clickReleased && submissionPendingAfterClick, staleStopControl: false, visibleErrors: 0 } } };
-        if (params.expression.includes("'MESSAGE_KEY: '")) return { result: { value: { ok: messageInserted && !messageSubmitted } } };
+        if (params.expression.includes("composerHasMessageKey")) {
+          const generating = generatingProbesLeft > 0;
+          if (generating) generatingProbesLeft -= 1;
+          return { result: { value: { composerFound: true, composerHasMessageKey: (messageInserted && !messageSubmitted) || composerDraftHasMessageKey, composerEmpty: (!messageInserted && !composerDraftHasMessageKey) || messageSubmitted, sendEnabled: ((messageInserted && !messageSubmitted) || composerDraftHasMessageKey) && !(clickReleased && submissionPendingAfterClick), submitting: generating || (clickReleased && submissionPendingAfterClick), staleStopControl: false, visibleErrors: 0 } } };
+        }
+        if (params.expression.includes("'MESSAGE_KEY: '")) {
+          const queued = pendingComposerDraftSequence.length ? pendingComposerDraftSequence.shift() : null;
+          return { result: { value: { ok: queued === null ? (messageInserted && !messageSubmitted) : queued } } };
+        }
         if (params.expression.includes("composer_not_found")) {
           composerChecks += 1;
           onComposerCheck?.(composerChecks);
@@ -306,7 +319,9 @@ function fakeCdp({
           const available = pendingComposerSequence.length ? pendingComposerSequence.shift() : composerAvailable;
           return { result: { value: { ok: available, focused: available, reason: available ? undefined : "composer_not_found", href } } };
         }
-        if (params.expression.includes("selectorMatches") && params.expression.includes("send-button")) return { result: { value: sendControl } };
+        if (params.expression.includes("selectorMatches") && params.expression.includes("send-button")) {
+          return { result: { value: pendingSendControlSequence.length ? pendingSendControlSequence.shift() : sendControl } };
+        }
       }
       if (method === "Input.insertText") messageInserted = true;
       if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased" && params.button === "left") {
@@ -557,19 +572,31 @@ test("send button metadata recognizes a real ChatGPT send button aligned beside 
   assert.equal(result.chosen?.metadata.nearComposer, true);
 });
 
-test("sendMessage uses Enter only when no safe send button is available", async () => {
+test("sendMessage never blind-enters and retains the draft when no safe send control exists", async () => {
   const fake = fakeCdp({
-    sendControl: { buttonCount: 3, selectorMatches: { 'button[data-testid="send-button"]': 0 }, candidates: [
+    sendControl: { buttonCount: 3, composerFound: true, composerRect: { x: 200, y: 700, width: 600, height: 80 }, selectorMatches: { 'button[data-testid="send-button"]': 0 }, candidates: [
       { tagName: "BUTTON", dataTestId: "stop-button", ariaLabel: "Stop generating", visible: true, nearComposer: true, forbidden: true },
       { tagName: "BUTTON", dataTestId: "voice-button", ariaLabel: "Voice mode", visible: true, nearComposer: true, forbidden: true },
     ], chosen: null },
   });
   const controller = fakeController(fake);
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
-  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
-  assert.equal(result.ok, true);
-  assert.ok(fake.calls.some(([method]) => method === "Input.dispatchKeyEvent"));
-  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"));
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => {
+    assert.equal(error.code, "bridge_send_not_submitted");
+    assert.equal(error.diagnostic.draftRetained, true);
+    assert.equal(error.diagnostic.submitAttempted, false);
+    assert.equal(error.diagnostic.sendControlFound, true);
+    assert.equal(error.diagnostic.sendControlEnabled, false);
+    assert.equal(error.diagnostic.messageVisible, false);
+    assert.equal(error.diagnostic.manualInterventionRequired, false);
+    return true;
+  });
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchKeyEvent"), "no blind Enter fallback");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"), "no click without an eligible control");
+  assert.ok(fake.calls.some(([method]) => method === "Input.insertText"));
+  const status = controller.status();
+  assert.equal(status.lastSubmitDiagnostic.draftRetained, true);
+  assert.equal(status.state, "error");
 });
 
 test("sendMessage fails if MESSAGE_KEY is absent from conversation messages after submission", async () => {
@@ -590,6 +617,207 @@ test("sendMessage holds a MESSAGE_KEY with an uncertain submit result and never 
   await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => error.code === "bridge_send_uncertain");
   assert.equal(fake.calls.length, callCount);
   assert.equal(controller.status().state, "uncertain");
+});
+
+test("a retained draft without a send control becomes exactly one bounded recovery, never a blind resend", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dsw-draft-recovery-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const outbox = new BridgeWakeOutbox({ filePath: join(directory, "outbox.json") });
+  await outbox.adoptCloudDelivery({
+    deliveryId: "delivery-draft", messageKey: "message-draft", projectId: "project_1", eventId: "event_1",
+    taskId: "task_1", eventName: "task.completed", revision: 1,
+    wakeTarget: { type: "chatgpt_conversation", url: "https://chatgpt.com/c/conv-draft", source: "site" },
+  });
+  assert.ok(await outbox.beginAttempt("message-draft"));
+  await outbox.markFailed("message-draft", Object.assign(new Error("no safe send control"), { code: "bridge_send_not_submitted" }));
+  const held = await outbox.findByMessageKey("message-draft");
+  assert.equal(held.delivery_state, "uncertain");
+  assert.equal(held.send_state, "safe_draft");
+
+  let sendAttempts = 0;
+  const bridge = {
+    // Reconciliation is read-only and keeps reporting the retained draft.
+    reconcileDelivery: async () => ({ state: "safe_draft", stage: "submission_state", diagnostic: { composerHasMessageKey: true, sendEnabled: true, readOnly: true } }),
+    sendEnvelope: async () => { sendAttempts += 1; throw Object.assign(new Error("still no safe send control"), { code: "bridge_send_not_submitted" }); },
+    sendLocalWake: async () => { sendAttempts += 1; throw Object.assign(new Error("still no safe send control"), { code: "bridge_send_not_submitted" }); },
+  };
+  const transport = new WakeTransport({ outbox, bridge });
+  await transport.drainOnce();
+  const recovered = await outbox.findByMessageKey("message-draft");
+  assert.equal(recovered.recovery_attempts, 1, "the safe draft schedules one bounded recovery");
+  assert.equal(sendAttempts, 1, "the recovery submits exactly once");
+
+  // Every later safe_draft reconciliation must not schedule another recovery.
+  await transport.drainOnce();
+  await transport.drainOnce();
+  const exhausted = await outbox.findByMessageKey("message-draft");
+  assert.equal(exhausted.delivery_state, "uncertain");
+  assert.equal(exhausted.recovery_attempts, 1, "recovery stays bounded to a single attempt");
+  assert.equal(sendAttempts, 1, "no blind resend after the bounded recovery is spent");
+  assert.ok(exhausted.reconcile_attempts >= 1, "later reconciliations are recorded without scheduling another send");
+});
+
+test("a draft that is never retained is retried without entering the uncertain hold", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "dsw-draft-lost-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const outbox = new BridgeWakeOutbox({ filePath: join(directory, "outbox.json") });
+  await outbox.adoptCloudDelivery({
+    deliveryId: "delivery-lost", messageKey: "message-lost", projectId: "project_1", eventId: "event_2",
+    taskId: "task_2", eventName: "task.completed", revision: 1,
+    wakeTarget: { type: "chatgpt_conversation", url: "https://chatgpt.com/c/conv-lost", source: "site" },
+  });
+  await outbox.beginAttempt("message-lost");
+  await outbox.markFailed("message-lost", Object.assign(new Error("draft not retained"), { code: "bridge_draft_not_inserted" }));
+  const row = await outbox.findByMessageKey("message-lost");
+  assert.equal(row.delivery_state, "pending", "nothing was submitted, so a normal retry is safe");
+  assert.equal(row.send_state, null);
+});
+
+test("sendMessage re-inserts a draft that hydration dropped, then submits the stable control once", async () => {
+  const fake = fakeCdp({ composerDraftSequence: [false], sendControlSequence: [null, null] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.equal(result.ok, true);
+  assert.equal(fake.calls.filter(([method]) => method === "Input.insertText").length, 1, "the dropped draft is re-inserted once");
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Input.dispatchMouseEvent").map(([, params]) => params.type), ["mouseMoved", "mousePressed", "mouseReleased"]);
+});
+
+test("sendMessage waits out a slow hydration instead of falling back to a blind submit", async () => {
+  // While ChatGPT is still hydrating the toolbar keeps re-rendering, so the
+  // observed fingerprint changes on every poll and the wait must continue.
+  const hydrating = (tick) => ({ buttonCount: 2, composerFound: true, composerRect: { x: 200, y: 700 + tick, width: 600, height: 80 }, selectorMatches: { 'button[data-testid="send-button"]': 1 }, candidates: [
+    { tagName: "BUTTON", dataTestId: "send-button", ariaLabel: "发送消息", disabled: true, visible: true, nearComposer: true, hitMatchesButton: true, isSendControl: true },
+  ], chosen: null });
+  const readyControl = { buttonCount: 2, composerFound: true, composerRect: { x: 200, y: 700, width: 600, height: 80 }, selectorMatches: { 'button[data-testid="send-button"]': 1 }, candidates: [
+    { tagName: "BUTTON", dataTestId: "send-button", ariaLabel: "发送消息", disabled: false, visible: true, nearComposer: true, hitMatchesButton: true, isSendControl: true },
+  ], chosen: { selector: 'button[data-testid="send-button"]', x: 420, y: 700, metadata: { tagName: "BUTTON", dataTestId: "send-button", disabled: false, hitMatchesButton: true } } };
+  const fake = fakeCdp({ sendControlSequence: [...Array(22).keys()].map((tick) => hydrating(tick)).concat([readyControl]) });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.equal(result.ok, true);
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchKeyEvent"));
+  assert.ok(fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"));
+  assert.equal(fake.calls.filter(([method]) => method === "Input.dispatchMouseEvent").length, 3, "the stable control is clicked exactly once");
+});
+
+test("sendMessage refuses to click a lookalike control such as Send feedback", async () => {
+  const lookalike = { buttonCount: 1, composerFound: true, composerRect: { x: 200, y: 700, width: 600, height: 80 }, selectorMatches: { 'button[aria-label*="Send" i]': 1 }, candidates: [
+    { tagName: "BUTTON", dataTestId: null, ariaLabel: "Send feedback", disabled: false, visible: true, nearComposer: true, hitMatchesButton: true, isSendControl: false },
+  ], chosen: null };
+  const fake = fakeCdp({ sendControl: lookalike });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => error.code === "bridge_send_not_submitted");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"));
+});
+
+test("send button metadata only accepts a control whose label really names the send action", () => {
+  const makeControl = (label, testId) => ({
+    tagName: "BUTTON", disabled: false,
+    getAttribute(name) { return ({ "data-testid": testId, "aria-label": label, role: null })[name] ?? null; },
+    contains(element) { return element === this; },
+    getBoundingClientRect: () => ({ x: 500, y: 730, width: 36, height: 36 }),
+    closest: () => null,
+  });
+  const composer = { getBoundingClientRect: () => ({ x: 200, y: 700, width: 600, height: 80 }), closest: () => null };
+  const run = (control) => runInNewContext(sendButtonMetadataScript(), {
+    document: {
+      querySelectorAll(selector) {
+        if (selector === "button") return [control];
+        if (selector === 'button[data-testid="send-button"]') return control.getAttribute("data-testid") === "send-button" ? [control] : [];
+        if (selector === 'button[aria-label*="Send" i]' || selector === 'button[aria-label*="发送"]') return control.getAttribute("aria-label") ? [control] : [];
+        if (selector === 'main form button[type="submit"]') return [];
+        if (selector === 'main [contenteditable="true"]') return [composer];
+        return [];
+      },
+      querySelector: () => null,
+      elementFromPoint: () => control,
+    },
+    getComputedStyle: () => ({ visibility: "visible", display: "block", opacity: "1" }),
+  });
+  assert.equal(run(makeControl("发送消息", null)).chosen?.metadata.ariaLabel, "发送消息", "a real label-only send button is accepted");
+  assert.equal(run(makeControl("Send message", null)).chosen?.metadata.ariaLabel, "Send message");
+  assert.equal(run(makeControl("Send feedback", null)).chosen, null, "a lookalike label is rejected");
+  assert.equal(run(makeControl("Stop generating", null)).chosen, null, "the stop control is never treated as send");
+  assert.equal(run(makeControl(null, "send-button")).chosen?.metadata.dataTestId, "send-button");
+});
+
+test("idle probe never reports a disabled send control as enabled", () => {
+  const composer = { value: "[DSW] MESSAGE_KEY: message-a", getBoundingClientRect: () => ({ x: 200, y: 700, width: 600, height: 80 }) };
+  const control = ({ label = null, testId = null, disabled = false }) => ({
+    disabled,
+    getAttribute(name) { return name === "aria-label" ? label : name === "data-testid" ? testId : null; },
+    getBoundingClientRect: () => ({ x: 500, y: 730, width: 36, height: 36 }),
+  });
+  const probe = (controls) => runInNewContext(composerSendStateScript("message-a"), {
+    document: {
+      activeElement: composer,
+      querySelectorAll(selector) {
+        if (selector === "button") return controls;
+        if (selector === '[role="alert"],[aria-live="assertive"]') return [];
+        return [composer];
+      },
+    },
+    getComputedStyle: () => ({ display: "flex", visibility: "visible", opacity: "1" }),
+  });
+  // Regression: the previous `testId || (label && !disabled)` precedence reported
+  // a disabled test-id button as an enabled send control.
+  const disabledById = probe([control({ testId: "send-button", disabled: true })]);
+  assert.equal(disabledById.sendControlFound, true);
+  assert.equal(disabledById.sendControlDisabled, true);
+  assert.equal(disabledById.sendEnabled, false);
+  // Regression: the real zh control is labelled 发送消息 and carries no test id.
+  const labelOnly = probe([control({ label: "发送消息" })]);
+  assert.equal(labelOnly.sendEnabled, true);
+  assert.equal(labelOnly.sendControlDisabled, false);
+  assert.equal(probe([control({ label: "发送", disabled: true })]).sendEnabled, false);
+  assert.equal(probe([control({ label: "Stop generating" })]).sendEnabled, false, "the stop control is not a send control");
+  assert.equal(probe([control({ label: "Send feedback" })]).sendEnabled, false, "a lookalike label is not a send control");
+  assert.equal(probe([control({ testId: "send-button" })]).sendEnabled, true);
+});
+
+test("sendMessage confirms a visible wake exactly once and never re-clicks on the same key", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/bound", reconciledMessageVisible: true });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.equal(result.ok, true);
+  assert.equal(result.deduplicated, true, "an already-visible MESSAGE_KEY is deduplicated before any click");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"));
+  assert.ok(!fake.calls.some(([method]) => method === "Input.insertText"));
+});
+
+test("sendMessage waits for an in-progress generation to finish before clicking", async () => {
+  const fake = fakeCdp({ generatingProbes: 5 });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.equal(result.ok, true);
+  const firstClick = fake.calls.findIndex(([method]) => method === "Input.dispatchMouseEvent");
+  assert.ok(firstClick > 0, "a click happened");
+  const stateProbes = fake.calls.slice(0, firstClick)
+    .filter(([method, params]) => method === "Runtime.evaluate" && params.expression.includes("composerHasMessageKey"));
+  assert.ok(stateProbes.length >= 6, `waited for the generation to end (saw ${stateProbes.length} state probes)`);
+});
+
+test("a confirmation timeout holds the MESSAGE_KEY instead of submitting a second time", async () => {
+  // The click landed, the composer cleared and a Stop control appeared, but the
+  // wake bubble has not rendered yet: the outcome is ambiguous, never a resend.
+  const fake = fakeCdp({ mouseClickWorks: false, submissionPendingAfterClick: true });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => {
+    assert.equal(error.code, "bridge_send_uncertain");
+    assert.equal(error.diagnostic.submitAttempted, true);
+    assert.equal(error.diagnostic.manualInterventionRequired, true);
+    return true;
+  });
+  const clicks = fake.calls.filter(([method]) => method === "Input.dispatchMouseEvent").length;
+  assert.equal(clicks, 3, "one click sequence only");
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => error.code === "bridge_send_uncertain");
+  assert.equal(fake.calls.filter(([method]) => method === "Input.dispatchMouseEvent").length, clicks, "a held key is never clicked again");
 });
 
 test("send button metadata rejects a center hit covered by an unrelated control", () => {
@@ -755,6 +983,75 @@ test("reconciliation only calls a draft safe when the exact message remains in a
   assert.equal(safeResult.diagnostic.composerHasMessageKey, true);
   assert.equal(safeResult.diagnostic.sendEnabled, true);
   assert.ok(!safe.calls.some(([method]) => method.startsWith("Input.")), "reconciliation is read-only and never submits on its own");
+});
+
+test("reconciliation matches one conversation across trailing-slash, query, www and project URL variants", async () => {
+  const variants = [
+    "https://chatgpt.com/c/conv-variant/",
+    "https://chatgpt.com/c/conv-variant?model=auto",
+    "https://chatgpt.com/c/conv-variant?temporary-chat=true#latest",
+    "https://www.chatgpt.com/c/conv-variant",
+    "https://chatgpt.com/g/g-project/c/conv-variant",
+  ];
+  for (const variant of variants) {
+    const fake = fakeCdp({ pageUrl: variant, composerDraftHasMessageKey: true });
+    const controller = fakeController(fake);
+    controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+    const result = await controller.reconcileDelivery({
+      project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1",
+      wake_target: { type: "chatgpt_conversation", url: "https://chatgpt.com/c/conv-variant", source: "site" },
+    });
+    assert.equal(result.diagnostic.targetFound, true, variant);
+    assert.equal(result.state, "safe_draft", variant);
+    assert.equal(result.diagnostic.readOnly, true, variant);
+    assert.ok(!fake.calls.some(([method]) => method === "Page.navigate" || method.startsWith("Input.")), `reconciliation stays read-only for ${variant}`);
+  }
+});
+
+test("reconciliation fails closed on a different chat, the home page and the global binding", async () => {
+  const fake = fakeCdp({
+    targets: [
+      { targetId: "home", type: "page", url: "https://chatgpt.com/" },
+      { targetId: "prefix", type: "page", url: "https://chatgpt.com/c/conv-variant-extra" },
+      { targetId: "config", type: "page", url: "https://chatgpt.com/c/legacy-bound" },
+    ],
+    composerDraftHasMessageKey: true,
+  });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.reconcileDelivery({
+    project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1",
+    wake_target: { type: "chatgpt_conversation", url: "https://chatgpt.com/c/conv-variant", source: "site" },
+  });
+  assert.equal(result.state, "uncertain");
+  assert.equal(result.stage, "target_location");
+  assert.equal(result.reason, "target_missing");
+  assert.equal(result.diagnostic.targetFound, false);
+  assert.equal(result.diagnostic.chatPageCount, 3);
+  assert.equal(result.diagnostic.readOnly, true);
+  assert.ok(!fake.calls.some(([method]) => method === "Target.attachToTarget"), "an unmatched target is never attached");
+  assert.ok(!fake.calls.some(([method]) => method === "Target.createTarget"), "reconciliation never opens a tab to search for the target");
+  assert.ok(!fake.calls.some(([method]) => method === "Page.navigate"), "reconciliation never navigates away from the current draft");
+  assert.ok(!fake.calls.some(([method]) => method.startsWith("Input.")));
+});
+
+test("reconciliation prefers the delivery wake_target over the globally bound conversation", async () => {
+  const fake = fakeCdp({
+    targets: [
+      { targetId: "config", type: "page", url: "https://chatgpt.com/c/legacy-bound" },
+      { targetId: "wake", type: "page", url: "https://chatgpt.com/c/conv-variant/" },
+    ],
+    composerDraftHasMessageKey: true,
+  });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.reconcileDelivery({
+    project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1",
+    wake_target: { type: "chatgpt_conversation", url: "https://chatgpt.com/c/conv-variant", source: "site" },
+  });
+  assert.equal(result.state, "safe_draft");
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "wake"));
+  assert.ok(!fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "config"));
 });
 
 test("reconciliation confirms only the matching sent message in the conversation region", async () => {
