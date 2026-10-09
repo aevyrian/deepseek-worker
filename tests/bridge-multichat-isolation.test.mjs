@@ -698,22 +698,42 @@ test("[fail-closed] invalid wake_target URLs are rejected instead of being guess
   }
 });
 
-test("[fail-closed] ambiguous tab sets are refused rather than guessed", async () => {
+test("[fail-closed] a missing target tab gets its own tab and never adopts another conversation", async () => {
+  // Agent B's contract: reuse only a tab that already IS this conversation,
+  // otherwise open one dedicated tab for the delivery. A missing tab is
+  // therefore not a refusal — refusing would make a first wake to a new
+  // conversation impossible. What must fail closed is the *guessing*: neither of
+  // the two unrelated open conversations may be navigated, adopted, activated or
+  // typed into.
   const harness = await createHarness({
     targets: [{ targetId: "tab-B", url: URL_B }, { targetId: "tab-C", url: URL_C }],
   });
   try {
-    await assert.rejects(
-      () => harness.controller.sendEnvelope(envelope({ key: "mk-amb-1", target: conversation(URL_A) })),
-      (error) => {
-        assert.equal(error.code, "bridge_target_tab_missing");
-        return true;
-      },
+    const result = await harness.controller.sendEnvelope(envelope({ key: "mk-amb-1", target: conversation(URL_A) }));
+    assert.equal(result.ok, true, "a conversation with no open tab must still be deliverable");
+
+    const creates = callsMatching(harness.calls, (call) => call.method === "Target.createTarget");
+    assert.equal(creates.length, 1, "exactly one dedicated tab is opened, never one per open conversation");
+    assert.equal(creates[0].params.url, URL_A, "the dedicated tab must be the requested conversation");
+
+    const created = [...harness.world.targets.values()].filter((entry) => entry.targetId.startsWith("created-"));
+    assert.equal(created.length, 1);
+    assert.equal(created[0].page.visibleMessages.length, 1, "the wake must land in the dedicated tab");
+
+    for (const [id, url] of [["tab-B", URL_B], ["tab-C", URL_C]]) {
+      assert.deepEqual(pageOperations(harness.calls, id), [],
+        `${id} must not be navigated, activated or typed into`);
+      assert.equal(harness.page(id).url, url, `${id} must stay where it was`);
+      assert.equal(harness.page(id).navigations, 0, `${id} must not be navigated`);
+      assert.equal(harness.page(id).composerText, "", `${id} must not be typed into`);
+      assert.equal(harness.page(id).visibleMessages.length, 0, `${id} must not receive the wake`);
+    }
+
+    assert.deepEqual(
+      callsMatching(harness.calls, (call) => call.method === "Target.activateTarget" || call.method === "Browser.setWindowBounds"),
+      [],
+      "a delivery must not focus, restore or activate any window",
     );
-    assert.deepEqual(callsMatching(harness.calls, (call) => FORBIDDEN_PAGE_OPERATIONS.includes(call.method)), [],
-      "an ambiguous tab set must not be resolved by navigating, creating or clicking anything");
-    assert.equal(harness.page("tab-B").composerText, "");
-    assert.equal(harness.page("tab-C").composerText, "");
   } finally {
     await harness.close();
   }
@@ -937,6 +957,7 @@ newInterfaceTest("runBridgeBootstrap drives probeBrowserHealth and never calls t
   const watchdog = setTimeout(() => controller.abort(), 6000);
   const probes = [];
   let testBridgeCalls = 0;
+  let cancelledWithLifecycle = null;
   const bridge = {
     runtime: { bridgeState: "uninitialized", bridgeBrowser: "unknown", bridgeLastError: null },
     status: () => ({ enabled: true, bound: true, state: "uninitialized", browser: "unknown" }),
@@ -944,6 +965,10 @@ newInterfaceTest("runBridgeBootstrap drives probeBrowserHealth and never calls t
     async probeBrowserHealth(options) {
       probes.push(options);
       controller.abort();
+      // Read at the instant of cancellation: the only thing that has aborted here
+      // is the lifecycle controller, so this proves lifecycle cancellation
+      // reaches the probe rather than being swallowed by the probe deadline.
+      cancelledWithLifecycle = options.signal?.aborted === true;
       return { ok: true, state: "ready", browserOnline: true };
     },
     async testBridge() {
@@ -962,7 +987,11 @@ newInterfaceTest("runBridgeBootstrap drives probeBrowserHealth and never calls t
 
     assert.equal(testBridgeCalls, 0, "the legacy testBridge must never be reached from bootstrap");
     assert.equal(probes.length, 1, "bootstrap must prepare browser health through probeBrowserHealth");
-    assert.equal(probes[0].signal, controller.signal, "lifecycle cancellation must reach the probe");
+    // The probe is handed a signal composed with the per-probe deadline, so it is
+    // not required to be the identical lifecycle instance; what must hold is that
+    // lifecycle cancellation propagates into it.
+    assert.ok(probes[0].signal, "the probe must receive an AbortSignal");
+    assert.equal(cancelledWithLifecycle, true, "lifecycle cancellation must reach the probe");
     assert.deepEqual(Object.keys(probes[0]).sort(), ["allowLaunch", "signal"],
       "bootstrap must not hand a conversation URL to the probe");
     assert.equal(probes[0].allowLaunch, true, "startup may launch the isolated browser");
@@ -1023,8 +1052,7 @@ newInterfaceTest("bootstrap preserves retry, backoff, stop and onReady semantics
     async isBrowserAvailable() { return false; },
     async probeBrowserHealth() {
       attempts += 1;
-      if (attempts < 3) throw Object.assign(new Error("temporary CDP failure"), { code: "bridge_cdp_unavailable" });
-      controller.abort();
+      if (attempts < 4) throw Object.assign(new Error("temporary CDP failure"), { code: "bridge_cdp_unavailable" });
       return { ok: true, state: "ready", browserOnline: true };
     },
     async testBridge() {
@@ -1036,16 +1064,16 @@ newInterfaceTest("bootstrap preserves retry, backoff, stop and onReady semantics
     await runBridgeBootstrap({
       bridge,
       getConfig: () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: URL_A, chatBridgeDebugPort: 65535 }),
-      onReady: () => { ready += 1; },
+      onReady: () => { ready += 1; controller.abort(); },
       signal: controller.signal,
       retryDelaysMs: [0, 100, 500],
-      sleep: async (ms) => {
-        delays.push(ms);
-        if (delays.length >= 4) controller.abort();
-      },
+      sleep: async (ms) => { delays.push(ms); },
     });
 
-    assert.equal(attempts, 3, "transient failures must be retried");
+    // Agent A's contract: the first probe of an outage cycle runs immediately and
+    // each retry waits one backoff entry first, so `retryDelaysMs` bounds the
+    // probe count at length + 1 and the 0ms entry is a yield, not a sleep.
+    assert.equal(attempts, 4, "transient failures must be retried up to the configured bound");
     assert.deepEqual(delays, [100, 500], "bounded backoff must be preserved");
     assert.equal(testBridgeCalls, 0);
     assert.equal(ready, 1, "onReady must fire exactly once when the probe succeeds");
@@ -1058,7 +1086,7 @@ newInterfaceTest("bootstrap stops after its bounded attempts instead of probing 
   const controller = new AbortController();
   const watchdog = setTimeout(() => controller.abort(), 6000);
   let attempts = 0;
-  let sleeps = 0;
+  const delays = [];
   const bridge = {
     runtime: { bridgeState: "uninitialized", bridgeBrowser: "unknown", bridgeLastError: null },
     status: () => ({ enabled: true, bound: true, state: "uninitialized", browser: "unknown" }),
@@ -1076,13 +1104,16 @@ newInterfaceTest("bootstrap stops after its bounded attempts instead of probing 
       signal: controller.signal,
       retryDelaysMs: [0, 10],
       checkIntervalMs: 15,
-      sleep: async () => {
-        sleeps += 1;
-        if (sleeps >= 3) controller.abort();
+      sleep: async (ms) => {
+        delays.push(ms);
+        if (delays.length >= 2) controller.abort();
       },
     });
 
-    assert.equal(attempts, 2, "a failed startup must stop after its configured attempts");
+    // Agent A's contract: one immediate probe plus one per backoff entry, then the
+    // terminal poll. A persistent outage must never reopen windows in a tight loop.
+    assert.equal(attempts, 3, "a failed startup must stop after its configured attempts");
+    assert.deepEqual(delays, [10, 15], "retries use the backoff, the terminal poll uses checkIntervalMs");
   } finally {
     clearTimeout(watchdog);
   }
@@ -1178,12 +1209,16 @@ newInterfaceTest("bootstrap runs concurrently with an in-flight delivery without
 // Integrator report
 // ---------------------------------------------------------------------------
 
-test("[report] baseline tally for the Agent A / Agent B interfaces", (t) => {
+test("[report] integrated tally for the Agent A / Agent B interfaces", (t) => {
   const lines = [
-    `baseline 9a24513672c3253cc0381cfec5da6c058b72b6ee: ${tally.green.length} new-interface contract(s) already satisfied, ${tally.red.length} expected baseline failure(s)`,
+    `baseline 9a24513672c3253cc0381cfec5da6c058b72b6ee: ${tally.green.length} new-interface contract(s) satisfied, ${tally.red.length} unmet`,
   ];
   for (const entry of tally.green) lines.push(`  green: ${entry}`);
-  for (const entry of tally.red) lines.push(`  expected-red: ${entry.name} -> ${entry.message}`);
+  for (const entry of tally.red) lines.push(`  unmet: ${entry.name} -> ${entry.message}`);
   t.diagnostic(lines.join("\n"));
   assert.ok(tally.green.length + tally.red.length > 0, "the new-interface contract tests must have run");
+  // On the integrated branch every agreed A/B interface contract must hold. This
+  // is the integration gate: the suite reports what is still unmet instead of
+  // letting a partially merged interface look green.
+  assert.deepEqual(tally.red, [], "every agreed new-interface contract must be satisfied after integration");
 });
