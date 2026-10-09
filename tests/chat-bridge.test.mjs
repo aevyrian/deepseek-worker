@@ -10,9 +10,12 @@ import { BridgeWakeOutbox } from "../lib/bridge-outbox.mjs";
 import { WakeCoordinator } from "../lib/wake-coordinator.mjs";
 import { WakeTransport } from "../lib/wake-transport.mjs";
 import {
+  BRIDGE_START_URL,
   ChatBridgeController,
+  bridgeProfileDir,
   bridgePublicState,
   bridgeReady,
+  browserLaunchArgs,
   buildBridgeControlMessage,
   buildCloudBridgeControlMessage,
   composerContainsMessageScript,
@@ -1597,4 +1600,146 @@ test("reconcileDelivery reports target_missing for another conversation without 
   assert.equal(result.reason, "target_missing");
   assert.equal(result.diagnostic.targetFound, false);
   assertNoNavigationPrimitives(fake);
+});
+
+// ---------------------------------------------------------------------------
+// Cold-start regression: the CDP browser never opens about:blank
+// ---------------------------------------------------------------------------
+
+/**
+ * Cold-start a real ChatBridgeController with a spawn mock, so the exact argv
+ * handed to the browser process can be inspected. `fetch` fails once (no CDP
+ * endpoint yet), which is what makes ensureBrowser take the launch path.
+ */
+async function coldStartLaunch({ options } = {}) {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) throw new Error("CDP not available");
+    return { ok: true, json: async () => ({ webSocketDebuggerUrl: "ws://127.0.0.1:9223/devtools/browser/test" }) };
+  };
+  const launches = [];
+  let cdpFactoryCalls = 0;
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.unref = () => {};
+  const controller = new ChatBridgeController({
+    runtime: {},
+    getConfig: () => ({
+      chatBridgeEnabled: true,
+      // A bound conversation exists and must never become the start page.
+      chatBridgeChatUrl: "https://chatgpt.com/c/legacy-bound",
+      chatBridgeDebugPort: 9223,
+    }),
+    cdpFactory: () => { cdpFactoryCalls += 1; throw new Error("the cold-start path must not open a CDP session"); },
+    findBrowserExecutable: () => "C:\\test\\chrome.exe",
+    spawnBrowser: (executable, args, spawnOptions) => {
+      launches.push({ executable, args, spawnOptions });
+      return child;
+    },
+  });
+  try {
+    await controller.ensureBrowser(options);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  return { launches, cdpFactoryCalls: () => cdpFactoryCalls };
+}
+
+test("browserLaunchArgs pins the neutral home page and can never emit about:blank", () => {
+  const args = browserLaunchArgs({ port: 9223, profileDir: "C:\\profile" });
+  assert.deepEqual(args, [
+    "--remote-debugging-port=9223",
+    "--user-data-dir=C:\\profile",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "https://chatgpt.com/",
+  ]);
+  assert.equal(BRIDGE_START_URL, "https://chatgpt.com/");
+  assert.equal(args.some((arg) => /about:blank/iu.test(arg)), false);
+});
+
+test("cold-start browser launch opens the ChatGPT home page instead of about:blank", async () => {
+  // No options: this is the `openHome: false` bootstrap/probe shape that used to
+  // produce an empty tab on every launch.
+  const launch = await coldStartLaunch();
+  assert.equal(launch.launches.length, 1, "exactly one browser process is spawned");
+  const [{ executable, args, spawnOptions }] = launch.launches;
+  assert.equal(executable, "C:\\test\\chrome.exe");
+  assert.deepEqual(args, [
+    "--remote-debugging-port=9223",
+    `--user-data-dir=${bridgeProfileDir()}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "https://chatgpt.com/",
+  ]);
+  assert.equal(args.at(-1), BRIDGE_START_URL, "the last argument is the start page");
+  assert.equal(args.some((arg) => /about:blank/iu.test(arg)), false, "no launch argument may be about:blank");
+  // Isolation: a stale binding must never be opened as the start page.
+  assert.equal(args.some((arg) => arg.includes("chatgpt.com/c/")), false, "no conversation URL may be opened at launch");
+  // The launch path must not send anything: a wake is only ever typed later,
+  // into a tab that was explicitly selected for that conversation.
+  assert.equal(args.some((arg) => arg.includes("[DSW]")), false, "a launch argument never carries a wake message");
+  // Port, profile and spawn options are unchanged by this fix.
+  assert.deepEqual(args.filter((arg) => arg.startsWith("--remote-debugging-port=")), ["--remote-debugging-port=9223"]);
+  assert.deepEqual(args.filter((arg) => arg.startsWith("--user-data-dir=")), [`--user-data-dir=${bridgeProfileDir()}`]);
+  assert.deepEqual(spawnOptions, { detached: false, windowsHide: false, stdio: "ignore" });
+  assert.equal(launch.cdpFactoryCalls(), 0, "launching the browser opens no CDP session and touches no page");
+});
+
+test("openHome no longer selects the launch URL in either direction", async () => {
+  const withHome = await coldStartLaunch({ options: { openHome: true } });
+  const withoutHome = await coldStartLaunch({ options: { openHome: false } });
+  assert.deepEqual(withHome.launches[0].args, withoutHome.launches[0].args);
+  assert.equal(withHome.launches[0].args.at(-1), BRIDGE_START_URL);
+  assert.equal(withoutHome.launches[0].args.at(-1), BRIDGE_START_URL);
+  assert.equal(withoutHome.launches[0].args.some((arg) => /about:blank/iu.test(arg)), false);
+});
+
+test("probeBrowserHealth cold-starts on the home page and never adopts or moves an old chat tab", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) throw new Error("CDP not available");
+    return { ok: true, json: async () => ({ webSocketDebuggerUrl: "ws://fake" }) };
+  };
+  // The launched browser exposes the neutral home page it was started on, plus a
+  // pre-existing conversation tab belonging to the user.
+  const fake = fakeCdp({
+    targets: [
+      { targetId: "home", type: "page", url: BRIDGE_START_URL },
+      { targetId: "old-chat", type: "page", url: "https://chatgpt.com/c/legacy-bound" },
+    ],
+  });
+  const launches = [];
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.unref = () => {};
+  const controller = new ChatBridgeController({
+    runtime: {},
+    getConfig: () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: "https://chatgpt.com/c/legacy-bound", chatBridgeDebugPort: 9223 }),
+    cdpFactory: () => fake.cdp,
+    findBrowserExecutable: () => "C:\\test\\chrome.exe",
+    spawnBrowser: (_executable, args) => { launches.push(args); return child; },
+  });
+  let health;
+  try {
+    health = await controller.probeBrowserHealth();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(health, { ok: true, state: "ready", browserOnline: true });
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].at(-1), BRIDGE_START_URL);
+  assert.equal(launches[0].some((arg) => /about:blank/iu.test(arg)), false);
+  // Read-only probe discipline is unchanged: no navigation, creation or typing.
+  assertNoNavigationPrimitives(fake, "the probe must never navigate, create, focus or type");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.insertText"), "the probe never types a wake message");
+  // Only the neutral home page is read; the user's conversation tab is untouched.
+  const attached = fake.calls.filter(([method]) => method === "Target.attachToTarget").map(([, params]) => params.targetId);
+  assert.deepEqual(attached, ["home"]);
 });
