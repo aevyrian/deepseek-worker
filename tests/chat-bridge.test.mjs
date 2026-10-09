@@ -16,14 +16,44 @@ import {
   buildBridgeControlMessage,
   buildCloudBridgeControlMessage,
   composerContainsMessageScript,
+  conversationBinding,
   normalizeBridgeChatUrl,
   normalizeBridgeEnvelope,
   normalizeWakeTarget,
   sameChatUrl,
+  sameTargetConversation,
   messageVisibleScript,
   sendButtonMetadataScript,
   composerSendStateScript,
 } from "../lib/chat-bridge.mjs";
+
+// Primitives that would move or focus a page. The send path may open its own tab
+// and type into it, but it must never navigate or focus a tab that already
+// exists, because another conversation's tab may hold an unsent user draft.
+const PAGE_NAVIGATION_PRIMITIVES = [
+  "Page.navigate",
+  "Target.activateTarget",
+  "Browser.setWindowBounds",
+];
+
+// Everything the health probe and the read-only reconciler must never use.
+const READ_ONLY_PRIMITIVES = [
+  ...PAGE_NAVIGATION_PRIMITIVES,
+  "Target.createTarget",
+  "Input.insertText",
+  "Input.dispatchKeyEvent",
+  "Input.dispatchMouseEvent",
+];
+
+function assertNoPageNavigation(fake, message) {
+  const used = fake.calls.filter(([method]) => PAGE_NAVIGATION_PRIMITIVES.includes(method)).map(([method]) => method);
+  assert.deepEqual(used, [], message);
+}
+
+function assertNoNavigationPrimitives(fake, message) {
+  const used = fake.calls.filter(([method]) => READ_ONLY_PRIMITIVES.includes(method)).map(([method]) => method);
+  assert.deepEqual(used, [], message);
+}
 
 const ENVELOPE = {
   delivery_id: "bridge_del_1",
@@ -225,6 +255,10 @@ function fakeCdp({
   sendControl = { buttonCount: 1, selectorMatches: { 'button[data-testid="send-button"]': 1 }, candidates: [], chosen: { selector: 'button[data-testid="send-button"]', x: 420, y: 700, metadata: { tagName: "BUTTON", dataTestId: "send-button", disabled: false, visible: true, nearComposer: true, hitMatchesButton: true } } },
   sendControlSequence = [],
   composerDraftSequence = [],
+  composerForeignDraft = false,
+  createTargetInitialUrl,
+  createTargetResolvedUrl,
+  createTargetLoadReads = 3,
   generatingProbes = 0,
   mouseClickWorks = true,
   enterSends = true,
@@ -241,6 +275,9 @@ function fakeCdp({
   const pendingComposerDraftSequence = [...composerDraftSequence];
   const targetInfos = targets ?? [{ targetId: "chat", type: "page", url: pageUrl }];
   const targetUrls = new Map(targetInfos.map((target) => [target.targetId, target.url]));
+  // Targets created through Target.createTarget that still have to "load" their
+  // requested URL, so a freshly created SPA tab can be exercised.
+  const pendingCreatedUrls = [];
   let activeTargetId = targetInfos[0]?.targetId ?? null;
   let href = activeTargetId ? targetUrls.get(activeTargetId) : pageUrl;
   let navigated = false;
@@ -257,10 +294,13 @@ function fakeCdp({
       if (method === "Target.getTargets") return { targetInfos: targetInfos.map((target) => ({ ...target, url: targetUrls.get(target.targetId) })) };
       if (method === "Target.createTarget") {
         const targetId = `created-${targetInfos.length + 1}`;
-        targetInfos.push({ targetId, type: "page", url: params.url });
-        targetUrls.set(targetId, params.url);
+        const initialUrl = createTargetInitialUrl ?? params.url;
+        const resolvedUrl = createTargetResolvedUrl ?? params.url;
+        targetInfos.push({ targetId, type: "page", url: initialUrl });
+        targetUrls.set(targetId, initialUrl);
+        if (initialUrl !== resolvedUrl) pendingCreatedUrls.push({ targetId, url: resolvedUrl, reads: createTargetLoadReads });
         activeTargetId = targetId;
-        href = params.url;
+        href = initialUrl;
         return { targetId };
       }
       if (method === "Target.attachToTarget") {
@@ -269,6 +309,15 @@ function fakeCdp({
         return { sessionId: "session" };
       }
       if (method === "Target.getTargetInfo") {
+        const pendingCreated = pendingCreatedUrls.find((item) => item.targetId === params.targetId);
+        if (pendingCreated) {
+          pendingCreated.reads -= 1;
+          if (pendingCreated.reads <= 0) {
+            targetUrls.set(pendingCreated.targetId, pendingCreated.url);
+            pendingCreatedUrls.splice(pendingCreatedUrls.indexOf(pendingCreated), 1);
+            if (activeTargetId === pendingCreated.targetId) href = pendingCreated.url;
+          }
+        }
         if (navigated && pendingSpaUrls.length) {
           href = pendingSpaUrls.shift();
           targetUrls.set(params.targetId, href);
@@ -302,7 +351,9 @@ function fakeCdp({
         if (params.expression.includes("composerHasMessageKey")) {
           const generating = generatingProbesLeft > 0;
           if (generating) generatingProbesLeft -= 1;
-          return { result: { value: { composerFound: true, composerHasMessageKey: (messageInserted && !messageSubmitted) || composerDraftHasMessageKey, composerEmpty: (!messageInserted && !composerDraftHasMessageKey) || messageSubmitted, sendEnabled: ((messageInserted && !messageSubmitted) || composerDraftHasMessageKey) && !(clickReleased && submissionPendingAfterClick), submitting: generating || (clickReleased && submissionPendingAfterClick), staleStopControl: false, visibleErrors: 0 } } };
+          const composerHasKey = (messageInserted && !messageSubmitted) || composerDraftHasMessageKey;
+          const composerEmpty = messageSubmitted || (!messageInserted && !composerDraftHasMessageKey && !composerForeignDraft);
+          return { result: { value: { composerFound: true, composerHasMessageKey: composerHasKey, composerEmpty, sendEnabled: composerHasKey && !(clickReleased && submissionPendingAfterClick), submitting: generating || (clickReleased && submissionPendingAfterClick), staleStopControl: false, visibleErrors: 0 } } };
         }
         if (params.expression.includes("'MESSAGE_KEY: '")) {
           const queued = pendingComposerDraftSequence.length ? pendingComposerDraftSequence.shift() : null;
@@ -467,22 +518,86 @@ test("sendMessage prefers the existing page that matches the requested conversat
   assert.ok(!fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/other"));
 });
 
-test("sendMessage navigates one existing ChatGPT tab to the configured conversation without creating another", async () => {
+test("sendMessage opens a new tab for the requested conversation instead of navigating an unrelated one", async () => {
   const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/unrelated" });
   const controller = fakeController(fake, "https://chatgpt.com/c/requested");
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
   await controller.sendEnvelope(LEGACY_ENVELOPE);
-  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/requested"));
-  assert.ok(!fake.calls.some(([method]) => method === "Target.createTarget"));
+  const created = fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url);
+  assert.deepEqual(created, ["https://chatgpt.com/c/requested"]);
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Page.navigate"), [], "no tab may ever be navigated");
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "created-2"));
+  const urls = fake.calls.filter(([method]) => method === "Target.getTargets").length;
+  assert.ok(urls >= 1);
 });
 
-test("sendMessage reuses the single blank Bridge page instead of creating another tab", async () => {
+test("sendMessage never adopts a single blank Bridge page", async () => {
   const fake = fakeCdp({ pageUrl: "about:blank" });
   const controller = fakeController(fake, "https://chatgpt.com/c/requested");
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
   await controller.sendEnvelope(LEGACY_ENVELOPE);
-  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/requested"));
-  assert.ok(!fake.calls.some(([method]) => method === "Target.createTarget"));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url), ["https://chatgpt.com/c/requested"]);
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Page.navigate"), []);
+  assert.ok(!fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "chat"), "the blank tab must stay untouched");
+});
+
+test("sendMessage leaves another conversation's tab alone and never types into it", async () => {
+  // Tab A already holds the target conversation; tab B holds a different chat
+  // that may contain an unsent user draft. Only A may be touched.
+  const fake = fakeCdp({ targets: [
+    { targetId: "tab-B", type: "page", url: "https://chatgpt.com/c/conversation-B" },
+    { targetId: "tab-A", type: "page", url: "https://chatgpt.com/c/conversation-A" },
+  ] });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await controller.sendEnvelope({ ...ENVELOPE, wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-A", url: "https://chatgpt.com/c/conversation-A", source: "site" } });
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "tab-A"));
+  assert.ok(!fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "tab-B"));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Page.navigate"), []);
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget"), []);
+});
+
+test("sendMessage refuses to type into a target that resolves to a different conversation", async () => {
+  // The requested tab exists but ChatGPT serves a different conversation id.
+  const fake = fakeCdp({ targets: [
+    { targetId: "tab-A", type: "page", url: "https://chatgpt.com/c/conversation-A" },
+  ], createTargetResolvedUrl: "https://chatgpt.com/c/conversation-OTHER", createTargetLoadReads: 1 });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(
+    controller.sendEnvelope({ ...ENVELOPE, wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-MISSING", url: "https://chatgpt.com/c/conversation-MISSING", source: "site" } }),
+    (error) => error.code === "bridge_conversation_unreachable",
+  );
+  assert.ok(!fake.calls.some(([method]) => method === "Input.insertText"), "a wrong target is never typed into");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"));
+});
+
+test("sendMessage waits for a freshly created tab whose SPA is still loading", async () => {
+  const fake = fakeCdp({
+    pageUrl: "https://chatgpt.com/c/legacy-bound",
+    createTargetInitialUrl: "about:blank",
+    createTargetLoadReads: 3,
+    composerSequence: [false, false, true],
+  });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const targetUrl = "https://chatgpt.com/c/conversation-slow";
+  const result = await controller.sendEnvelope({ ...ENVELOPE, wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-slow", url: targetUrl, source: "site" } });
+  assert.equal(result.ok, true);
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url), [targetUrl]);
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Page.navigate"), []);
+  const reads = fake.calls.filter(([method, params]) => method === "Target.getTargetInfo" && params.targetId === "created-2");
+  assert.ok(reads.length >= 3, "the created tab's URL is polled until it commits");
+});
+
+test("sendMessage preserves an existing unrelated composer draft and submits nothing", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/legacy-bound", composerForeignDraft: true });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => error.code === "bridge_composer_draft_present");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.insertText"), "the existing draft is never overwritten");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"), "the existing draft is never submitted");
+  assert.equal(controller.runtime.bridgeLastSubmitDiagnostic.draftRetained, true);
 });
 
 test("composer message-key verification checks the composer value without reading unrelated page text", () => {
@@ -915,8 +1030,8 @@ test("sendEnvelope uses the delivery wake_target instead of the legacy global co
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
   const targetUrl = "https://chatgpt.com/c/conversation-A";
   await controller.sendEnvelope({ ...ENVELOPE, wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-A", url: targetUrl, source: "test" } });
-  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === targetUrl));
-  assert.ok(!fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/bound"));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url), [targetUrl]);
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Page.navigate"), []);
 });
 
 test("sendEnvelope without wake_target uses the global conversation only for an explicit legacy delivery", async () => {
@@ -924,7 +1039,8 @@ test("sendEnvelope without wake_target uses the global conversation only for an 
   const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
   await controller.sendEnvelope(LEGACY_ENVELOPE);
-  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/legacy-bound"));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url), ["https://chatgpt.com/c/legacy-bound"]);
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Page.navigate"), []);
 });
 
 test("sendEnvelope refuses a delivery that has neither a wake_target nor an explicit legacy flag", async () => {
@@ -947,12 +1063,12 @@ test("sendLocalWake refuses an unbound delivery and honours the Site legacy flag
   const base = { project_id: "project_123", task_id: "task_123", message_key: "bridge_msg_1", terminal_state: "completed" };
   await assert.rejects(controller.sendLocalWake(base), (error) => error.code === "bridge_wake_target_required");
   await controller.sendLocalWake({ ...base, legacy_binding: true });
-  assert.ok(fake.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/legacy-bound"));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url), ["https://chatgpt.com/c/legacy-bound"]);
   const targeted = fakeCdp({ pageUrl: "https://chatgpt.com/c/other" });
   const targetedController = fakeController(targeted, "https://chatgpt.com/c/legacy-bound");
   targetedController.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
   await targetedController.sendLocalWake({ ...base, legacy_binding: true, wake_target: TARGETED_ENVELOPE.wake_target });
-  assert.ok(targeted.calls.some(([method, params]) => method === "Page.navigate" && params.url === TARGETED_ENVELOPE.wake_target.url));
+  assert.deepEqual(targeted.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url), [TARGETED_ENVELOPE.wake_target.url]);
   assert.ok(!targeted.calls.some(([method, params]) => method === "Page.navigate" && params.url === "https://chatgpt.com/c/legacy-bound"));
 });
 
@@ -1093,10 +1209,10 @@ test("Site deliveries flow through the durable outbox and transport into each de
   const transport = new WakeTransport({ outbox, bridge: controller });
   await transport.drainOnce();
 
-  const navigations = fake.calls.filter(([method]) => method === "Page.navigate").map(([, params]) => params.url);
-  assert.ok(navigations.includes(targetA.url), navigations.join(","));
-  assert.ok(navigations.includes(targetB.url), navigations.join(","));
-  assert.ok(!navigations.includes("https://chatgpt.com/c/legacy-bound"));
+  const opened = fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url);
+  assert.ok(opened.includes(targetA.url), opened.join(","));
+  assert.ok(opened.includes(targetB.url), opened.join(","));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Page.navigate"), [], "the legacy tab is never navigated");
   assert.equal((await outbox.findByMessageKey("message-A")).delivery_state, "delivered");
   assert.equal((await outbox.findByMessageKey("message-B")).delivery_state, "delivered");
 });
@@ -1280,4 +1396,205 @@ test("pre-send visibility probe requires the complete project/task/message ident
   assert.match(script, /project_123/);
   assert.match(script, /task_123/);
   assert.match(script, /bridge_msg_1/);
+});
+
+// ---------------------------------------------------------------------------
+// Agent B contract: probeBrowserHealth + independent conversation tabs
+// ---------------------------------------------------------------------------
+
+test("probeBrowserHealth reports ready from the neutral home page without moving the browser", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "home", type: "page", url: "https://chatgpt.com/" }] });
+  const controller = fakeController(fake);
+  let ensureOptions = null;
+  controller.ensureBrowser = async (options) => { ensureOptions = options; return { version: { webSocketDebuggerUrl: "ws://fake" } }; };
+  const health = await controller.probeBrowserHealth();
+  assert.deepEqual(health, { ok: true, state: "ready", browserOnline: true });
+  assert.equal(ensureOptions.allowLaunch, true);
+  assert.equal(ensureOptions.openHome, false, "the probe must not ask the browser to open a page");
+  assertNoNavigationPrimitives(fake, "the probe must never navigate, create, focus or type");
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "home"));
+  // Integration contract: a ready probe is what makes the bridge advertisement ready.
+  assert.equal(controller.runtime.bridgeBrowser, "online");
+  assert.equal(bridgeReady(controller.runtime, { chatBridgeEnabled: true, chatBridgeChatUrl: "https://chatgpt.com/c/bound" }), true);
+});
+
+test("probeBrowserHealth forwards allowLaunch and reports unavailable without touching a page", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "home", type: "page", url: "https://chatgpt.com/" }] });
+  const controller = fakeController(fake);
+  let ensureOptions = null;
+  controller.ensureBrowser = async (options) => {
+    ensureOptions = options;
+    throw Object.assign(new Error("Chat Bridge CDP browser is not already connected"), { code: "bridge_cdp_unavailable" });
+  };
+  const health = await controller.probeBrowserHealth({ allowLaunch: false });
+  assert.deepEqual(health, { ok: false, state: "unavailable", browserOnline: false });
+  assert.equal(ensureOptions.allowLaunch, false);
+  assert.equal(controller.runtime.bridgeBrowser, "unavailable");
+  assert.equal(fake.calls.length, 0, "an unavailable browser never opens a CDP session");
+});
+
+test("probeBrowserHealth reports needs-login from an already-open login wall without attaching to it", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "auth", type: "page", url: "https://chatgpt.com/auth/login" }] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const health = await controller.probeBrowserHealth();
+  assert.deepEqual(health, { ok: false, state: "needs-login", browserOnline: true });
+  assert.equal(controller.status().state, "needs-login");
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.attachToTarget"), []);
+  assertNoNavigationPrimitives(fake);
+});
+
+test("probeBrowserHealth reports needs-login when the home page shows the login wall", async () => {
+  const fake = fakeCdp({ login: true, targets: [{ targetId: "home", type: "page", url: "https://chatgpt.com/" }] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  assert.deepEqual(await controller.probeBrowserHealth(), { ok: false, state: "needs-login", browserOnline: true });
+  assertNoNavigationPrimitives(fake);
+});
+
+test("probeBrowserHealth never inspects or claims login for an unrelated conversation tab", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "conv", type: "page", url: "https://chatgpt.com/c/some-private-chat" }] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const health = await controller.probeBrowserHealth();
+  // Ready means "CDP capability is usable to attempt a delivery" and nothing
+  // more: login was not confirmed, so it must not be reported as logged in.
+  assert.deepEqual(health, { ok: true, state: "ready", browserOnline: true });
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.attachToTarget"), [], "an unrelated chat tab is never attached to");
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Runtime.evaluate"), [], "an unrelated chat tab is never read");
+  assertNoNavigationPrimitives(fake);
+});
+
+test("probeBrowserHealth treats an aborted signal as cancellation, not as a health result", async () => {
+  const fake = fakeCdp();
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const abort = new AbortController();
+  abort.abort(new Error("shutdown"));
+  await assert.rejects(controller.probeBrowserHealth({ signal: abort.signal }), /shutdown/u);
+});
+
+test("the health probe is what the bootstrap loop calls; the legacy testBridge stays out of it", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "home", type: "page", url: "https://chatgpt.com/" }] });
+  const controller = fakeController(fake);
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  let legacyCalls = 0;
+  controller.testBridge = async () => { legacyCalls += 1; throw new Error("must not be called"); };
+  await controller.probeBrowserHealth();
+  await controller.probeBrowserHealth({ allowLaunch: false });
+  assert.equal(legacyCalls, 0);
+  assert.ok(!fake.calls.some(([method]) => method === "Page.navigate"));
+});
+
+test("sameTargetConversation binds the conversation id, the explicit project group and the HTTPS host", () => {
+  assert.equal(sameTargetConversation("https://chatgpt.com/c/abc", "https://www.chatgpt.com/c/abc/"), true);
+  assert.equal(sameTargetConversation("https://chatgpt.com/c/abc?model=x", "https://chatgpt.com/c/abc"), true);
+  assert.equal(sameTargetConversation("https://chatgpt.com/g/g-p-1/c/abc", "https://chatgpt.com/c/abc"), true);
+  assert.equal(sameTargetConversation("https://chatgpt.com/g/g-p-1/c/abc", "https://chatgpt.com/g/g-p-1/c/abc"), true);
+  assert.equal(sameTargetConversation("https://chatgpt.com/g/g-p-2/c/abc", "https://chatgpt.com/g/g-p-1/c/abc"), false);
+  assert.equal(sameTargetConversation("https://chatgpt.com/c/abc", "https://chatgpt.com/c/other"), false);
+  assert.equal(sameTargetConversation("https://chatgpt.com/c/abc", "https://chatgpt.com/"), false);
+  assert.equal(sameTargetConversation("https://chatgpt.com/c/abc", "https://chatgpt.com/auth/login"), false);
+  assert.equal(sameTargetConversation("http://chatgpt.com/c/abc", "https://chatgpt.com/c/abc"), false);
+  assert.equal(sameTargetConversation("https://evil.example/c/abc", "https://chatgpt.com/c/abc"), false);
+  assert.equal(conversationBinding("https://chatgpt.com/g/g-p-1/c/abc").groupId, "g-p-1");
+  assert.equal(conversationBinding("https://chatgpt.com/c/abc").groupId, null);
+});
+
+test("sendMessage reuses a canonical tab for a project-prefixed wake target and opens no extra tab", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "tab-A", type: "page", url: "https://chatgpt.com/c/conversation-A" }] });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope({
+    ...ENVELOPE,
+    wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-A", url: "https://chatgpt.com/g/g-p-1/c/conversation-A", source: "site" },
+  });
+  assert.equal(result.ok, true);
+  assert.ok(fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "tab-A"));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget"), []);
+  assertNoPageNavigation(fake);
+});
+
+test("sendMessage never types into a tab that belongs to a different explicit project group", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "tab-other-group", type: "page", url: "https://chatgpt.com/g/g-p-2/c/conversation-A" }] });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await controller.sendEnvelope({
+    ...ENVELOPE,
+    wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-A", url: "https://chatgpt.com/g/g-p-1/c/conversation-A", source: "site" },
+  });
+  assert.ok(!fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "tab-other-group"));
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url), ["https://chatgpt.com/g/g-p-1/c/conversation-A"]);
+});
+
+test("a legacy delivery never navigates the default empty ChatGPT page", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "home", type: "page", url: "https://chatgpt.com/" }] });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.equal(result.ok, true);
+  assert.deepEqual(fake.calls.filter(([method]) => method === "Target.createTarget").map(([, params]) => params.url), ["https://chatgpt.com/c/legacy-bound"]);
+  assert.ok(!fake.calls.some(([method, params]) => method === "Target.attachToTarget" && params.targetId === "home"));
+  assertNoPageNavigation(fake);
+});
+
+test("sendMessage is idempotent when the same MESSAGE_KEY is already visible in the target conversation", async () => {
+  const fake = fakeCdp({ pageUrl: "https://chatgpt.com/c/legacy-bound", reconciledMessageVisible: true });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.sendEnvelope(LEGACY_ENVELOPE);
+  assert.equal(result.ok, true);
+  assert.equal(result.deduplicated, true);
+  assert.ok(!fake.calls.some(([method]) => method === "Input.insertText"), "a visible identical wake is never typed again");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"));
+});
+
+test("sendMessage never clicks a disabled send control and keeps the verified draft", async () => {
+  const fake = fakeCdp({
+    pageUrl: "https://chatgpt.com/c/legacy-bound",
+    sendControl: {
+      buttonCount: 1,
+      selectorMatches: { 'button[data-testid="send-button"]': 1 },
+      candidates: [{ tagName: "BUTTON", dataTestId: "send-button", disabled: true, visible: true, nearComposer: true, hitMatchesButton: true, forbidden: false, isSendControl: true }],
+      chosen: null,
+    },
+  });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  await assert.rejects(controller.sendEnvelope(LEGACY_ENVELOPE), (error) => error.code === "bridge_send_not_submitted");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchMouseEvent"), "a disabled control is never clicked");
+  assert.ok(!fake.calls.some(([method]) => method === "Input.dispatchKeyEvent"), "the blind Enter fallback must not come back");
+  assert.equal(controller.runtime.bridgeLastSubmitDiagnostic.draftRetained, true);
+});
+
+test("reconcileDelivery stays read-only and never opens, navigates or types into a tab", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "tab-A", type: "page", url: "https://chatgpt.com/c/conversation-A" }] });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  let ensureOptions = null;
+  controller.ensureBrowser = async (options) => { ensureOptions = options; return { version: { webSocketDebuggerUrl: "ws://fake" } }; };
+  const result = await controller.reconcileDelivery({
+    project_id: "project_123",
+    task_id: "task_123",
+    message_key: "bridge_msg_1",
+    wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-A", url: "https://chatgpt.com/c/conversation-A", source: "site" },
+  });
+  assert.equal(result.state, "uncertain");
+  assert.equal(result.diagnostic.readOnly, true);
+  assert.equal(ensureOptions.allowLaunch, false, "reconcile never launches a browser");
+  assertNoNavigationPrimitives(fake, "reconcile must never navigate, create, focus or type");
+});
+
+test("reconcileDelivery reports target_missing for another conversation without creating a tab", async () => {
+  const fake = fakeCdp({ targets: [{ targetId: "tab-B", type: "page", url: "https://chatgpt.com/c/conversation-B" }] });
+  const controller = fakeController(fake, "https://chatgpt.com/c/legacy-bound");
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const result = await controller.reconcileDelivery({
+    project_id: "project_123",
+    task_id: "task_123",
+    message_key: "bridge_msg_1",
+    wake_target: { type: "chatgpt_conversation", conversation_id: "conversation-A", url: "https://chatgpt.com/c/conversation-A", source: "site" },
+  });
+  assert.equal(result.reason, "target_missing");
+  assert.equal(result.diagnostic.targetFound, false);
+  assertNoNavigationPrimitives(fake);
 });
