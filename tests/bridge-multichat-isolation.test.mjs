@@ -138,6 +138,7 @@ class FakeCdp {
     const page = this.#page(targetId);
     if (!page) return null;
     const script = scriptOf(expression);
+    this.world.beforeEvaluate?.(targetId, script, page);
     if (!script) {
       this.unknownScripts.push(expression.slice(0, 120));
       return null;
@@ -153,7 +154,13 @@ class FakeCdp {
           ? { ok: true, focused: true, tag: "DIV", href: page.url }
           : { ok: false, reason: "composer_not_found", href: page.url };
       case "composerContains":
-        return { ok: page.composerText.includes(`MESSAGE_KEY: ${messageKey}`) };
+        return {
+          ok: page.composerText.includes(`MESSAGE_KEY: ${messageKey}`),
+          matchesExpectedMessage: (() => {
+            const literal = expression.match(/=== ("(?:[^"\\]|\\.)*")/u)?.[1];
+            return !literal || page.composerText.trim() === JSON.parse(literal);
+          })(),
+        };
       case "sendButtonMetadata":
         return this.#sendButtonMetadata(page);
       case "composerSendState":
@@ -522,7 +529,7 @@ test("[harness] the fake CDP endpoint and script dispatch drive a real end-to-en
   }
 });
 
-test("[baseline-behaviour] status().state stays masked as unbound when only wake_target deliveries exist", async () => {
+test("[status] wake-target-only delivery retains its delivery state without a global binding", async () => {
   // Documents a baseline property the multi-conversation work must be aware of:
   // `bridgePublicState` derives its `state` from the GLOBAL chatBridgeChatUrl,
   // so a wake_target-only deployment reports `unbound` even right after a
@@ -534,7 +541,7 @@ test("[baseline-behaviour] status().state stays masked as unbound when only wake
 
     assert.equal(result.ok, true);
     assert.equal(harness.runtime.bridgeState, "sent");
-    assert.equal(result.state, "unbound", "the public state still comes from the global binding");
+    assert.equal(result.state, "sent", "the delivery fact stays visible without a global binding");
     assert.equal(result.bound, false);
     assert.equal(harness.page("tab-A").visibleMessages.length, 1);
   } finally {
@@ -698,25 +705,18 @@ test("[fail-closed] invalid wake_target URLs are rejected instead of being guess
   }
 });
 
-test("[fail-closed] ambiguous tab sets are refused rather than guessed", async () => {
-  const harness = await createHarness({
-    targets: [{ targetId: "tab-B", url: URL_B }, { targetId: "tab-C", url: URL_C }],
-  });
+test("[isolation] absent requested tab creates a new tab without changing unrelated tabs", async () => {
+  const harness = await createHarness({ targets: [{ targetId: "tab-B", url: URL_B }, { targetId: "tab-C", url: URL_C }] });
   try {
-    await assert.rejects(
-      () => harness.controller.sendEnvelope(envelope({ key: "mk-amb-1", target: conversation(URL_A) })),
-      (error) => {
-        assert.equal(error.code, "bridge_target_tab_missing");
-        return true;
-      },
-    );
-    assert.deepEqual(callsMatching(harness.calls, (call) => FORBIDDEN_PAGE_OPERATIONS.includes(call.method)), [],
-      "an ambiguous tab set must not be resolved by navigating, creating or clicking anything");
+    const result = await harness.controller.sendEnvelope(envelope({ key: "mk-amb-1", target: conversation(URL_A) }));
+    assert.equal(result.ok, true);
+    assert.equal(callsMatching(harness.calls, (call) => call.method === "Target.createTarget").length, 1);
+    assert.equal(harness.page("tab-B").url, URL_B);
+    assert.equal(harness.page("tab-C").url, URL_C);
     assert.equal(harness.page("tab-B").composerText, "");
     assert.equal(harness.page("tab-C").composerText, "");
-  } finally {
-    await harness.close();
-  }
+    assert.deepEqual(callsMatching(harness.calls, (call) => call.method === "Page.navigate"), []);
+  } finally { await harness.close(); }
 });
 
 test("[fail-closed] reconcile reports target_missing instead of moving the browser to look for the conversation", async () => {
@@ -943,7 +943,6 @@ newInterfaceTest("runBridgeBootstrap drives probeBrowserHealth and never calls t
     async isBrowserAvailable() { return false; },
     async probeBrowserHealth(options) {
       probes.push(options);
-      controller.abort();
       return { ok: true, state: "ready", browserOnline: true };
     },
     async testBridge() {
@@ -955,6 +954,7 @@ newInterfaceTest("runBridgeBootstrap drives probeBrowserHealth and never calls t
     await runBridgeBootstrap({
       bridge,
       getConfig: () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: URL_A, chatBridgeDebugPort: 65535 }),
+      onReady: () => controller.abort(),
       signal: controller.signal,
       retryDelaysMs: [0],
       sleep: boundedSleep(controller, 2),
@@ -962,7 +962,7 @@ newInterfaceTest("runBridgeBootstrap drives probeBrowserHealth and never calls t
 
     assert.equal(testBridgeCalls, 0, "the legacy testBridge must never be reached from bootstrap");
     assert.equal(probes.length, 1, "bootstrap must prepare browser health through probeBrowserHealth");
-    assert.equal(probes[0].signal, controller.signal, "lifecycle cancellation must reach the probe");
+    assert.equal(probes[0].signal.aborted, true, "lifecycle cancellation must reach the composed deadline signal");
     assert.deepEqual(Object.keys(probes[0]).sort(), ["allowLaunch", "signal"],
       "bootstrap must not hand a conversation URL to the probe");
     assert.equal(probes[0].allowLaunch, true, "startup may launch the isolated browser");
@@ -1024,7 +1024,6 @@ newInterfaceTest("bootstrap preserves retry, backoff, stop and onReady semantics
     async probeBrowserHealth() {
       attempts += 1;
       if (attempts < 3) throw Object.assign(new Error("temporary CDP failure"), { code: "bridge_cdp_unavailable" });
-      controller.abort();
       return { ok: true, state: "ready", browserOnline: true };
     },
     async testBridge() {
@@ -1036,7 +1035,7 @@ newInterfaceTest("bootstrap preserves retry, backoff, stop and onReady semantics
     await runBridgeBootstrap({
       bridge,
       getConfig: () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: URL_A, chatBridgeDebugPort: 65535 }),
-      onReady: () => { ready += 1; },
+      onReady: () => { ready += 1; controller.abort(); },
       signal: controller.signal,
       retryDelaysMs: [0, 100, 500],
       sleep: async (ms) => {
@@ -1046,7 +1045,7 @@ newInterfaceTest("bootstrap preserves retry, backoff, stop and onReady semantics
     });
 
     assert.equal(attempts, 3, "transient failures must be retried");
-    assert.deepEqual(delays, [100, 500], "bounded backoff must be preserved");
+    assert.deepEqual(delays, [100], "bounded backoff must be preserved");
     assert.equal(testBridgeCalls, 0);
     assert.equal(ready, 1, "onReady must fire exactly once when the probe succeeds");
   } finally {
@@ -1082,7 +1081,7 @@ newInterfaceTest("bootstrap stops after its bounded attempts instead of probing 
       },
     });
 
-    assert.equal(attempts, 2, "a failed startup must stop after its configured attempts");
+    assert.equal(attempts, 4, "after retry exhaustion health remains read-only and polls at the normal interval");
   } finally {
     clearTimeout(watchdog);
   }
@@ -1186,4 +1185,147 @@ test("[report] baseline tally for the Agent A / Agent B interfaces", (t) => {
   for (const entry of tally.red) lines.push(`  expected-red: ${entry.name} -> ${entry.message}`);
   t.diagnostic(lines.join("\n"));
   assert.ok(tally.green.length + tally.red.length > 0, "the new-interface contract tests must have run");
+});
+
+
+test("[concurrency] simultaneous duplicate delivery submits once and creates one target", async () => {
+  const harness = await createHarness({ targets: [] });
+  try {
+    const raw = envelope({ key: "mk-concurrent", target: conversation(URL_A) });
+    const results = await Promise.all([harness.controller.sendEnvelope(raw), harness.controller.sendEnvelope(raw)]);
+    assert.equal(results.filter((r) => r.deduplicated).length, 1);
+    assert.equal(callsMatching(harness.calls, (c) => c.method === "Target.createTarget").length, 1);
+    assert.equal(callsMatching(harness.calls, (c) => c.method === "Input.insertText").length, 1);
+    assert.equal(callsMatching(harness.calls, (c) => c.method === "Input.dispatchMouseEvent" && c.params.type === "mousePressed").length, 1);
+  } finally { await harness.close(); }
+});
+
+test("[draft] human draft appearing after preflight survives without insertion or click", async () => {
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }] });
+  let containsRead = false;
+  harness.world.beforeEvaluate = (_target, script, page) => {
+    if (script === "composerContains" && !containsRead) {
+      containsRead = true;
+      page.composerText = "Human draft typed while delivery was preparing";
+    }
+  };
+  try {
+    await assert.rejects(harness.controller.sendEnvelope(envelope({ key: "mk-late-draft", target: conversation(URL_A) })), e => e.code === "bridge_composer_draft_present");
+    assert.equal(harness.page("tab-A").composerText, "Human draft typed while delivery was preparing");
+    assert.deepEqual(callsMatching(harness.calls, c => c.method === "Input.insertText" || c.method === "Input.dispatchMouseEvent"), []);
+  } finally { await harness.close(); }
+});
+
+
+test("[draft] user edit to a retained message-key draft is never submitted", async () => {
+  const raw = envelope({ key: "mk-edited", target: conversation(URL_A) });
+  const edited = buildCloudBridgeControlMessage(raw) + "\nHuman annotation";
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A, page: { composerText: edited } }] });
+  try {
+    await assert.rejects(harness.controller.sendEnvelope(raw), e => e.code === "bridge_composer_draft_present");
+    assert.equal(harness.page("tab-A").composerText, edited);
+    assert.deepEqual(callsMatching(harness.calls, c => c.method === "Input.insertText" || c.method === "Input.dispatchMouseEvent"), []);
+  } finally { await harness.close(); }
+});
+
+
+test("[progress] durable stages precede submit and persistence failure prevents every click", async () => {
+  for (const failedStage of [null, "draft_verified", "submit_attempted"]) {
+    const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }] });
+    const progress = [];
+    try {
+      const sending = harness.controller.sendEnvelope(envelope({ key: "mk-progress", target: conversation(URL_A) }), {
+        onProgress: async (stage, diagnostic) => {
+          progress.push(stage);
+          assert.equal(diagnostic.composerHasMessageKey, true);
+          assert.deepEqual(callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent"), []);
+          if (stage === failedStage) throw new Error("simulated durable write failure");
+        },
+      });
+      if (failedStage) {
+        await assert.rejects(sending, e => e.code === "bridge_progress_persist_failed");
+        assert.deepEqual(callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent"), []);
+        assert.equal(harness.page("tab-A").visibleMessages.length, 0);
+      } else {
+        assert.equal((await sending).ok, true);
+        assert.deepEqual(progress, ["draft_verified", "submit_attempted"]);
+      }
+    } finally { await harness.close(); }
+  }
+});
+
+test("[visibility] a failed pre-send visibility observation never permits insertion or click", async () => {
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }] });
+  harness.world.beforeEvaluate = (_target, script) => {
+    if (script === "messageVisible") throw new Error("simulated observation failure");
+  };
+  try {
+    await assert.rejects(harness.controller.sendEnvelope(envelope({ key: "mk-visibility-failure", target: conversation(URL_A) })));
+    assert.deepEqual(callsMatching(harness.calls, c => c.method === "Input.insertText" || c.method === "Input.dispatchMouseEvent"), []);
+  } finally { await harness.close(); }
+});
+
+
+test("[visibility] a failed post-submit observation holds the key even when the composer retains a ready draft", async () => {
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }], onSubmit: () => {} });
+  let observations = 0;
+  harness.world.beforeEvaluate = (_target, script) => {
+    if (script === "messageVisible" && callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent" && c.params.type === "mousePressed").length > 0) throw new Error("simulated post-submit observation failure");
+  };
+  const raw = envelope({ key: "mk-post-visibility", target: conversation(URL_A) });
+  try {
+    await assert.rejects(harness.controller.sendEnvelope(raw), e => e.code === "bridge_send_uncertain");
+    const clicks = callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent" && c.params.type === "mousePressed").length;
+    await assert.rejects(harness.controller.sendEnvelope(raw), e => e.code === "bridge_send_uncertain");
+    assert.equal(clicks, 1);
+    assert.equal(callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent" && c.params.type === "mousePressed").length, clicks);
+  } finally { await harness.close(); }
+});
+
+
+test("[progress] a user edit during durable submit-intent persistence is preserved", async () => {
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }] });
+  try {
+    await assert.rejects(harness.controller.sendEnvelope(envelope({ key: "mk-write-edit", target: conversation(URL_A) }), {
+      onProgress: async stage => {
+        if (stage === "submit_attempted") harness.page("tab-A").composerText = "Human edit while durable write awaited";
+      },
+    }), e => e.code === "bridge_composer_draft_present");
+    assert.equal(harness.page("tab-A").composerText, "Human edit while durable write awaited");
+    assert.deepEqual(callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent"), []);
+  } finally { await harness.close(); }
+});
+
+
+test("[visibility] a late-hydrated existing bubble deduplicates before durable submit intent or click", async () => {
+  const raw = envelope({ key: "mk-late-bubble", target: conversation(URL_A) });
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }] });
+  let visibilityReads = 0;
+  const progress = [];
+  harness.world.beforeEvaluate = (_target, script, page) => {
+    if (script === "messageVisible" && ++visibilityReads === 2) page.visibleMessages.push(buildCloudBridgeControlMessage(raw));
+  };
+  try {
+    const result = await harness.controller.sendEnvelope(raw, { onProgress: async stage => progress.push(stage) });
+    assert.equal(result.deduplicated, true);
+    assert.deepEqual(progress, ["draft_verified"]);
+    assert.equal(harness.page("tab-A").visibleMessages.length, 1);
+    assert.deepEqual(callsMatching(harness.calls, c => c.method === "Input.dispatchMouseEvent"), []);
+  } finally { await harness.close(); }
+});
+
+
+test("[concurrency] separate controllers sharing one browser port cannot mix concurrent drafts", async () => {
+  const harness = await createHarness({ targets: [{ targetId: "tab-A", url: URL_A }] });
+  const second = new ChatBridgeController({ runtime: {}, getConfig: () => harness.settings, cdpFactory: harness.controller.cdpFactory });
+  try {
+    const one = envelope({ key: "mk-controller-one", target: conversation(URL_A) });
+    const two = envelope({ key: "mk-controller-two", target: conversation(URL_A) });
+    const results = await Promise.all([harness.controller.sendEnvelope(one), second.sendEnvelope(two)]);
+    assert.equal(results.every(r => r.ok), true);
+    const messages = harness.page("tab-A").visibleMessages;
+    assert.equal(messages.length, 2);
+    assert.equal(messages[0].includes("MESSAGE_KEY: mk-controller-two"), false);
+    assert.equal(messages[1].includes("MESSAGE_KEY: mk-controller-one"), false);
+  } finally { await harness.close(); }
 });

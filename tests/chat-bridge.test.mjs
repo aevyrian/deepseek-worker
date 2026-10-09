@@ -144,7 +144,7 @@ test("Bridge readiness preserves the wake advertisement contract across bridge s
   assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "ready" }, {
     chatBridgeEnabled: true,
     chatBridgeChatUrl: "",
-  }), false);
+  }), true);
   assert.equal(bridgeReady({ bridgeBrowser: "online" }, {
     chatBridgeEnabled: true,
     chatBridgeChatUrl: "",
@@ -182,8 +182,8 @@ test("browser spawn errors become a controlled Bridge failure without leaking pa
   try {
     await assert.rejects(controller.ensureBrowser(), (error) => error.code === "bridge_browser_spawn_failed");
     assert.equal(runtime.bridgeBrowser, "unavailable");
-    assert.equal(runtime.bridgeState, "error");
-    assert.doesNotMatch(runtime.bridgeLastError, /private|missing-browser/iu);
+    assert.equal(runtime.bridgeHealthState, "error");
+    assert.doesNotMatch(runtime.bridgeHealthLastError, /private|missing-browser/iu);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -357,7 +357,7 @@ function fakeCdp({
         }
         if (params.expression.includes("'MESSAGE_KEY: '")) {
           const queued = pendingComposerDraftSequence.length ? pendingComposerDraftSequence.shift() : null;
-          return { result: { value: { ok: queued === null ? (messageInserted && !messageSubmitted) : queued } } };
+          return { result: { value: { ok: queued === null ? (messageInserted && !messageSubmitted) : queued, matchesExpectedMessage: true } } };
         }
         if (params.expression.includes("composer_not_found")) {
           composerChecks += 1;
@@ -1439,7 +1439,7 @@ test("probeBrowserHealth reports needs-login from an already-open login wall wit
   controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
   const health = await controller.probeBrowserHealth();
   assert.deepEqual(health, { ok: false, state: "needs-login", browserOnline: true });
-  assert.equal(controller.status().state, "needs-login");
+  assert.equal(controller.status().healthState, "needs-login");
   assert.deepEqual(fake.calls.filter(([method]) => method === "Target.attachToTarget"), []);
   assertNoNavigationPrimitives(fake);
 });
@@ -1597,4 +1597,26 @@ test("reconcileDelivery reports target_missing for another conversation without 
   assert.equal(result.reason, "target_missing");
   assert.equal(result.diagnostic.targetFound, false);
   assertNoNavigationPrimitives(fake);
+});
+
+
+test("transport readiness supports wake targets without a global conversation and preserves delivery uncertainty", () => {
+  const config = { chatBridgeEnabled: true, chatBridgeChatUrl: "" };
+  const runtime = { bridgeBrowser: "online", bridgeHealthState: "ready", bridgeState: "uncertain", bridgeLastError: "Ambiguous submit" };
+  assert.equal(bridgeReady(runtime, config), true);
+  assert.equal(bridgePublicState(runtime, config).readinessScope, "transport");
+  assert.equal(bridgePublicState(runtime, config).lastError, "Ambiguous submit");
+  assert.equal(bridgeReady({ ...runtime, bridgeHealthState: "needs-login" }, config), false);
+});
+
+
+test("message visibility rejects assistant echoes and accepts an explicit user bubble", () => {
+  const expression = messageVisibleScript("project-a", "task-a", "message-a");
+  const textContent = "PROJECT_ID: project-a TASK_ID: task-a MESSAGE_KEY: message-a";
+  const assistantTurn = { textContent };
+  const assistantOnly = { querySelectorAll: selector => selector.includes("conversation-turn-") ? [assistantTurn] : [] };
+  assert.equal(runInNewContext(expression, { document: assistantOnly }), false);
+  const userBubble = { textContent };
+  assert.equal(runInNewContext(expression, { document: { querySelectorAll: selector => selector.includes('[data-message-author-role="user"]') ? [userBubble] : [] } }), true);
+  assert.doesNotMatch(expression, /conversation-turn-/u);
 });

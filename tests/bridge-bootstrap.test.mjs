@@ -54,7 +54,7 @@ function fakeBridge({ state = "uninitialized", browser = "unknown", config = {} 
       if (!browserOnline && options.allowLaunch !== false) browserOnline = true;
       runtime.bridgeBrowser = browserOnline ? "online" : "unavailable";
       if (!browserOnline) return unavailable();
-      runtime.bridgeState = "ready";
+      runtime.bridgeHealthState = "ready";
       return ready(true);
     },
     // Legacy entry point. Bootstrap must not reach for it; calling it records the
@@ -104,7 +104,7 @@ test("startup bootstrap probes browser health, then wakes the durable transport 
   assert.equal(fake.calls.length, 1);
   assert.equal(fake.calls[0].abortedAtCall, false, "lifecycle cancellation reaches the health probe");
   assert.equal(fake.calls[0].allowLaunch, true, "the first probe of an outage cycle may launch the browser");
-  assert.equal(fake.runtime.bridgeState, "ready");
+  assert.equal(fake.runtime.bridgeHealthState, "ready");
   assert.equal(kicks, 1);
   assert.deepEqual(fake.navigation, [], "bootstrap must not navigate the bound conversation");
 });
@@ -154,14 +154,14 @@ test("browser online probing does not depend on chatBridgeChatUrl", async () => 
   await runBridgeBootstrap({
     bridge: fake.bridge,
     getConfig: () => fake.settings,
-    onReady: () => { throw new Error("an unbound conversation must not wake the transport"); },
+    onReady: () => {},
     signal: controller.signal,
     retryDelaysMs: [0],
     sleep,
   });
   assert.equal(fake.calls.length, 1, "the browser is still brought online without a bound chat URL");
   assert.equal(fake.calls[0].allowLaunch, true);
-  assert.equal(fake.runtime.bridgeState, "ready");
+  assert.equal(fake.runtime.bridgeHealthState, "ready");
   assert.deepEqual(fake.navigation, [], "no fallback navigation to a global chat URL");
 });
 
@@ -192,7 +192,7 @@ test("startup retries a transient failure with bounded backoff then recovers", a
       attempts += 1;
       if (attempts < 4) throw Object.assign(new Error("temporary CDP failure"), { code: "bridge_cdp_unavailable" });
       setBrowserOnline(true);
-      runtime.bridgeState = "ready";
+      runtime.bridgeHealthState = "ready";
       return ready(true);
     },
   } });
@@ -278,7 +278,7 @@ test("login recovery reuses the open browser and never launches another", async 
   assert.equal(fake.calls.length, 1);
   assert.equal(fake.calls[0].allowLaunch, true, "the first probe may open the browser for the user to log into");
   assert.equal(fake.calls[0].abortedAtCall, false);
-  assert.equal(fake.runtime.bridgeState, "needs-login");
+  assert.equal(fake.runtime.bridgeHealthState, "needs-login");
   assert.deepEqual(fake.navigation, [], "login recovery must not navigate or focus a conversation tab");
 });
 
@@ -341,7 +341,7 @@ test("a wedged probe is bounded by probeTimeoutMs instead of stalling the loop",
       probes += 1;
       if (probes === 1) {
         // Never settles on its own; only the bootstrap probe deadline can end it.
-        options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+        // Deliberately ignore cancellation: the loop must still time out.
         return;
       }
       resolve(ready(true));
@@ -373,4 +373,17 @@ test("bootstrap refuses a controller without the probeBrowserHealth contract", a
     }),
     /probeBrowserHealth/,
   );
+});
+
+
+test("health polling preserves an uncertain delivery and permits only one launch during persistent outage", async () => {
+  const controller = new AbortController();
+  const fake = fakeBridge({ state: "uncertain", config: { probeBrowserHealth: () => unavailable() } });
+  fake.runtime.bridgeLastError = "Ambiguous submit must be reconciled";
+  const { sleep } = abortingSleep(controller, 4);
+  await runBridgeBootstrap({ bridge: fake.bridge, getConfig: () => fake.settings, signal: controller.signal, retryDelaysMs: [0, 1], checkIntervalMs: 1, sleep });
+  assert.equal(fake.runtime.bridgeState, "uncertain");
+  assert.equal(fake.runtime.bridgeLastError, "Ambiguous submit must be reconciled");
+  assert.equal(fake.calls.filter(c => c.allowLaunch).length, 1);
+  assert.equal(fake.runtime.bridgeHealthState, "error");
 });
