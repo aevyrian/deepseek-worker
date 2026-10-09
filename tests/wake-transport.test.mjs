@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { spawn } from "node:child_process";
 
 import { BridgeWakeOutbox } from "../lib/bridge-outbox.mjs";
 import { WakeCoordinator } from "../lib/wake-coordinator.mjs";
 import { WakeTransport } from "../lib/wake-transport.mjs";
+
+async function abandonLegacyAttempt(filePath) {
+  const db = JSON.parse(await readFile(filePath, 'utf8'));
+  for (const row of db.deliveries) delete row.send_owner_pid;
+  await writeFile(filePath, JSON.stringify(db));
+}
 
 async function makeOutbox(t, label = "outbox", options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dsw-wake-transport-"));
@@ -176,6 +183,7 @@ test("interrupted send is reconciled as delivered and Cloud ACK is durably recor
   })).row;
   await firstProcess.beginAttempt(queued.message_key);
 
+  await abandonLegacyAttempt(filePath);
   const restartedOutbox = new BridgeWakeOutbox({ filePath });
   let reconcileCalls = 0;
   let bridgeCalls = 0;
@@ -206,6 +214,7 @@ test("a confirmed safe draft receives one bounded recovery attempt", async (t) =
   const first = new BridgeWakeOutbox({ filePath });
   const queued = await first.enqueueLocal({ projectId: "project-1", taskId: "task-draft", terminalState: "completed" });
   await first.beginAttempt(queued.message_key);
+  await abandonLegacyAttempt(filePath);
   const restarted = new BridgeWakeOutbox({ filePath });
   let reconcileCalls = 0;
   let sendCalls = 0;
@@ -230,6 +239,7 @@ test("an uncertain delivery is repeatedly reconciled with durable backoff and ne
   const first = new BridgeWakeOutbox({ filePath, now: () => now, reconcileBaseMs: 1000, reconcileMaxMs: 4000 });
   const queued = await first.enqueueLocal({ projectId: "project-1", taskId: "task-unknown", terminalState: "completed" });
   await first.beginAttempt(queued.message_key);
+  await abandonLegacyAttempt(filePath);
   const restarted = new BridgeWakeOutbox({ filePath, now: () => now, reconcileBaseMs: 1000, reconcileMaxMs: 4000 });
   let reconcileCalls = 0;
   let sendCalls = 0;
@@ -303,6 +313,7 @@ test("concurrent transport instances share the durable reconciliation lock", asy
   const first = new BridgeWakeOutbox({ filePath });
   const queued = await first.enqueueLocal({ projectId: "project-1", taskId: "task-concurrent-reconcile", terminalState: "completed" });
   await first.beginAttempt(queued.message_key);
+  await abandonLegacyAttempt(filePath);
   const outbox = new BridgeWakeOutbox({ filePath });
   let calls = 0;
   let release;
@@ -341,4 +352,174 @@ test("transport run resumes pending work, responds to kicks and stops on abort",
   assert.equal(sends, 2, "kick should prompt a pending wake");
   controller.abort();
   await running;
+});
+
+test("safe draft with missing target can recover once while an ambiguous send never retries", async (t) => {
+  const outbox = await makeOutbox(t);
+  const safe = await outbox.enqueueLocal({ projectId: "draft", taskId: "safe", terminalState: "completed" });
+  const unknown = await outbox.enqueueLocal({ projectId: "draft", taskId: "unknown", terminalState: "completed" });
+  await outbox.markFailed(safe.message_key, Object.assign(new Error("not submitted"), { code: "bridge_send_not_submitted" }));
+  await outbox.markFailed(unknown.message_key, Object.assign(new Error("maybe submitted"), { code: "bridge_send_uncertain" }));
+  const sends = [];
+  const transport = new WakeTransport({ outbox, bridge: {
+    async reconcileDelivery() { return { state: "uncertain", reason: "target_missing", stage: "target_location" }; },
+    async sendLocalWake(row) { sends.push(row.message_key); },
+  }, logger: { warn() {} } });
+  assert.deepEqual(await transport.drainOnce(), { attempted: 1, delivered: 1 });
+  assert.deepEqual(sends, [safe.message_key]);
+  assert.equal((await outbox.findByMessageKey(unknown.message_key)).delivery_state, "uncertain");
+});
+
+test("Cloud adoption of an ambiguous local wake reconciles the original key and ACKs only the formal key", async (t) => {
+  const outbox = await makeOutbox(t);
+  const local = await outbox.enqueueLocal({ projectId: "adopt", taskId: "task", terminalState: "completed" });
+  await outbox.beginAttempt(local.message_key);
+  await outbox.markFailed(local.message_key, Object.assign(new Error("maybe submitted"), { code: "bridge_send_uncertain" }));
+  const envelope = { deliveryId: "formal-id", messageKey: "formal-key", projectId: "adopt", taskId: "task", eventId: "event", eventName: "task.completed", revision: 2 };
+  const adopted = await outbox.adoptCloudDelivery(envelope);
+  assert.equal(adopted.row.message_key, local.message_key);
+  assert.equal(adopted.row.delivery_state, "uncertain");
+  await outbox.adoptCloudDelivery(envelope);
+  const acknowledgements = [];
+  const transport = new WakeTransport({ outbox, bridge: {
+    async reconcileDelivery(row) { assert.equal(row.message_key, local.message_key); return { state: "delivered" }; },
+    async sendEnvelope() { assert.fail("ambiguous local wake must never become a fresh Cloud send"); },
+  }, acknowledgeDelivery: async (row) => acknowledgements.push(row) });
+  assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 1 });
+  assert.equal(acknowledgements[0].message_key, "formal-key");
+  const receipt = await outbox.findByMessageKey(local.message_key);
+  assert.equal(receipt.message_visible, true);
+  assert.equal(receipt.transport_acked, true);
+  assert.equal(receipt.orchestrator_handled, null);
+  assert.deepEqual(await transport.drainOnce(), { attempted: 0, delivered: 0 });
+});
+
+test("concurrent ACKs remain exclusive even after the retry delay elapses", async (t) => {
+  let now = "2026-10-09T00:00:00.000Z";
+  const outbox = await makeOutbox(t, "acks", { now: () => now, retryBaseMs: 1000 });
+  const adopted = await outbox.adoptCloudDelivery({ deliveryId: "ack-id", messageKey: "ack-key", projectId: "ack-project", taskId: "task", eventId: "event", eventName: "task.completed", revision: 1 });
+  await outbox.markDelivered(adopted.row.message_key);
+  let release, started;
+  const gate = new Promise((done) => { release = done; });
+  const entered = new Promise((done) => { started = done; });
+  let calls = 0;
+  const options = { outbox, bridge: {}, acknowledgeDelivery: async () => { calls++; started(); await gate; } };
+  const a = new WakeTransport(options), b = new WakeTransport(options);
+  const active = a.acknowledgeCloudDelivery(adopted.row);
+  await entered;
+  now = "2026-10-09T00:01:00.000Z";
+  assert.equal(await b.acknowledgeCloudDelivery(adopted.row), false);
+  release();
+  await active;
+  assert.equal(calls, 1);
+  await outbox.failCloudAck(adopted.row.message_key, new Error("late stale callback"));
+  await outbox.markFailed(adopted.row.message_key, new Error("late stale send callback"));
+  const row = await outbox.findByMessageKey(adopted.row.message_key);
+  assert.equal(row.delivery_state, "delivered");
+  assert.equal(row.cloud_ack_state, "acked");
+});
+
+test("transport durably records draft and submit intent before allowing the simulated click", async (t) => {
+  const outbox = await makeOutbox(t);
+  const queued = await outbox.enqueueLocal({ projectId: "progress", taskId: "task", terminalState: "completed" });
+  assert.equal(queued.delivery_stage, "queued");
+  const transport = new WakeTransport({ outbox, bridge: { async sendLocalWake(row, { onProgress }) {
+    await onProgress("draft_verified", { composerHasMessageKey: true, draftRetained: true, url: "private", cookie: "secret" });
+    let persisted = JSON.parse(await readFile(outbox.filePath, "utf8")).deliveries[0];
+    assert.equal(persisted.delivery_stage, "draft_verified");
+    assert.equal(persisted.submit_attempted, false);
+    await onProgress("submit_attempted");
+    persisted = JSON.parse(await readFile(outbox.filePath, "utf8")).deliveries[0];
+    assert.equal(persisted.delivery_stage, "submit_attempted");
+    assert.equal(persisted.submit_attempted, true);
+    assert.doesNotMatch(JSON.stringify(persisted.submit_diagnostic), /private|secret/u);
+  } } });
+  await transport.drainOnce();
+  assert.equal((await outbox.findByMessageKey(queued.message_key)).delivery_stage, "message_visible");
+});
+
+test("a failed progress write prevents the simulated click and preserves retry evidence", async (t) => {
+  const outbox = await makeOutbox(t);
+  const queued = await outbox.enqueueLocal({ projectId: "progress-failure", taskId: "task", terminalState: "completed" });
+  let clicks = 0;
+  outbox.recordSendProgress = async () => { throw new Error("disk write failed"); };
+  const transport = new WakeTransport({ outbox, bridge: { async sendLocalWake(row, { onProgress }) {
+    await onProgress("draft_verified");
+    clicks++;
+  } }, logger: { warn() {} } });
+  await transport.drainOnce();
+  assert.equal(clicks, 0);
+  assert.equal((await outbox.findByMessageKey(queued.message_key)).delivery_state, "pending");
+  assert.equal((await outbox.findByMessageKey(queued.message_key)).last_failure, "disk write failed");
+});
+
+test("already visible local adoption immediately ACKs the formal key and keeps original bubble identity", async (t) => {
+  const outbox = await makeOutbox(t);
+  const local = await outbox.enqueueLocal({ projectId: "visible-adopt", taskId: "task", terminalState: "completed" });
+  await outbox.markDelivered(local.message_key);
+  const acknowledgements = [];
+  const transport = new WakeTransport({ outbox, bridge: {}, acknowledgeDelivery: async (row) => acknowledgements.push(row) });
+  const coordinator = new WakeCoordinator({ outbox, transport });
+  const envelope = { delivery_id: "formal-visible", message_key: "formal-visible-key", project_id: "visible-adopt", task_id: "task", event_id: "event", event_name: "task.completed", project_revision: 1 };
+  await coordinator.acceptResponse({ bridge_delivery: envelope });
+  assert.equal(acknowledgements.length, 1);
+  assert.equal(acknowledgements[0].message_key, envelope.message_key);
+  const receipt = await outbox.findByMessageKey(local.message_key);
+  assert.equal(receipt.message_key, local.message_key);
+  assert.equal(receipt.cloud_ack_state, "acked");
+  assert.equal(receipt.delivery_stage, "transport_acked");
+  assert.equal(receipt.orchestrator_handled, null);
+});
+
+test("two processes serialize distinct messages through one UI submission transaction", async (t) => {
+  const outbox = await makeOutbox(t);
+  const rows = await Promise.all(["a", "b"].map((taskId) => outbox.enqueueLocal({ projectId: "serialized", taskId, terminalState: "completed" })));
+  const counterPath = `${outbox.filePath}.counter`;
+  await writeFile(counterPath, JSON.stringify({ active: 0, maximum: 0 }));
+  await Promise.all(rows.map((row) => new Promise((done, reject) => {
+    const code = `
+      import { readFile,writeFile } from 'node:fs/promises';
+      import { BridgeWakeOutbox } from './lib/bridge-outbox.mjs';
+      import { WakeTransport } from './lib/wake-transport.mjs';
+      const box = new BridgeWakeOutbox({filePath:${JSON.stringify(outbox.filePath)}});
+      const list = box.listPending.bind(box);
+      box.listPending = async () => (await list()).filter(row => row.message_key === ${JSON.stringify(row.message_key)});
+      await new WakeTransport({outbox:box,bridge:{async sendLocalWake(row,{onProgress}){
+        await onProgress('draft_verified'); await onProgress('submit_attempted');
+        const path=${JSON.stringify(counterPath)};
+        let state=JSON.parse(await readFile(path,'utf8')); state.active++; state.maximum=Math.max(state.maximum,state.active); await writeFile(path,JSON.stringify(state));
+        await new Promise(done=>setTimeout(done,50));
+        state=JSON.parse(await readFile(path,'utf8')); state.active--; await writeFile(path,JSON.stringify(state));
+      }}}).drainOnce();`;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", code], { cwd: new URL("..", import.meta.url), stdio: ["ignore", "ignore", "pipe"] });
+    let errors = "";
+    child.stderr.on("data", (chunk) => { errors += chunk; }); child.on("error", reject);
+    child.on("exit", (status) => status === 0 ? done() : reject(new Error(errors)));
+  })));
+  assert.deepEqual(JSON.parse(await readFile(counterPath, "utf8")), { active: 0, maximum: 1 });
+  for (const row of rows) assert.equal((await outbox.findByMessageKey(row.message_key)).delivery_state, "delivered");
+});
+
+test("disabling while waiting for the submission lock does not claim or send a new delivery", async (t) => {
+  const outbox = await makeOutbox(t);
+  const row = await outbox.enqueueLocal({ projectId: "disable", taskId: "task", terminalState: "completed" });
+  let release, entered, waiting;
+  const gate = new Promise((done) => { release = done; });
+  const acquired = new Promise((done) => { entered = done; });
+  const queued = new Promise((done) => { waiting = done; });
+  const blocker = outbox.withSubmissionLock(async () => { entered(); await gate; });
+  await acquired;
+  const originalLock = outbox.withSubmissionLock.bind(outbox);
+  outbox.withSubmissionLock = (operation) => { waiting(); return originalLock(operation); };
+  let enabled = true, sends = 0;
+  const transport = new WakeTransport({ outbox, enabled: () => enabled, bridge: { async sendLocalWake() { sends++; } } });
+  const drain = transport.drainOnce();
+  await queued;
+  enabled = false;
+  release();
+  await blocker;
+  await drain;
+  assert.equal(sends, 0);
+  assert.equal((await outbox.findByMessageKey(row.message_key)).attempts, 0);
+  assert.equal((await outbox.findByMessageKey(row.message_key)).delivery_state, "pending");
 });
