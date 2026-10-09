@@ -1,6 +1,6 @@
 # DeepSeek Worker P0 修复与上下文续接记录
 
-更新时间：2026-10-09，Asia/Shanghai。本文先保存当前检查点；最终提交、测试数字和未解决问题将在本轮结束前更新。
+更新时间：2026-10-09，Asia/Shanghai。本地修复已统一集成；本文保存源码状态、证据、真实验收阻塞与下一上下文的操作边界。最终候选 SHA 与包指纹以交付目录的 `candidate-receipt.json` 为准。
 
 ## 用户目标与边界
 
@@ -38,7 +38,16 @@ A/B/C 按用户指定顺序 cherry-pick，均无文本冲突：
 
 平台报告原提交 `05b3964d802ec2d2c99f32e0e5553ef538531637`，集成为 `26b4634`。完整官方来源、匿名身份与 URL 区分、绑定恢复和 ACK 语义见 `docs/p0-platform-boundaries.md`。
 
-此检查点的 integration/protocol 后续修复仍在工作目录中，未提交完成前不能作为可安装版本。
+后续修复均已提交并集成：
+
+| 内容 | 原始/集成提交 |
+|---|---|
+| 健康状态分离、硬 deadline、单启动周期、共享发送队列、持久阶段与草稿保护 | `9ee252ba3f2c50f1b655e632541affca4ec7189b` |
+| 最终发送按钮重新取位、完整 marker 匹配、助手引用排除 | `531d005601222ab6da1ad64b2b6475720bfe9a56` |
+| 持久协议、跨进程互斥、崩溃恢复、正式 ACK alias、有界重试 | 原始 `72a791ccd2c43cc06127ecdbf8b7f029db85e511`，集成 `bf7afa27b5695b0d5482c7696277c6498b5e36d7` |
+| 禁止 supersede 已尝试/需人工处理的本地通知 | 原始 `51b71f559f3a1d50ed5e5b7f41facdcb87d64bef`，集成 `e89bd70e0582e9835e09d0d4157ea50562b4056a` |
+
+A/B/C 和后续协议提交都无文本合并冲突；C 的测试契约需要调整：缺目标标签现在新建独立标签、health 和 delivery 状态分离、取消全局绑定门槛、硬 deadline 使用组合取消信号。没有删除失败验收条件，新增了对应最终行为与安全反例。
 
 ## 已证实的缺陷与修复方向
 
@@ -47,18 +56,51 @@ A/B/C 按用户指定顺序 cherry-pick，均无文本冲突：
 3. 同一聊天并发发送缺少完整互斥；预检后用户新增草稿、插入后草稿变化及点击前发送状态需重新验证。
 4. 原 Outbox 仅实例级锁；同进程另一实例初始化可将正在发送的记录当崩溃。历史记录按数量裁剪会丢去重凭证，亦可能删除未完成 transport ACK 的记录。
 5. 本地未决通知被 Cloud 接管时，旧实现可能新建 pending 消息，改变页面去重身份；必须保留原 message key 并分开正式 Cloud ACK key。
-6. 独立审查发现 same-key 本地记录的 Cloud adoption 分支未切换 Cloud 元数据，导致不进入 ACK 队列；Agent protocol 正在修复。
+6. 独立审查发现 same-key 本地记录的 Cloud adoption 分支未切换 Cloud 元数据，导致不进入 ACK 队列；已修复，并覆盖正式 key 的即时 ACK。
 7. 仅 uncertain reconcile 有界不足以满足要求；pending delivery 与 ACK-only 重试也需要次数/时间边界，触界保留记录并明确人工处理。
 8. 原指纹未覆盖 Bootstrap、coordinator 和 native execution 等关键源码。已经扩展源码覆盖，但旧指纹与新指纹算法不同，不能直接比较来断言回滚。
 
-## 需验证或明确披露的风险
+## 最终投递架构与实际保证
 
-- 文件锁与发送/ACK owner 的 PID 重用或同进程插件重载可能使旧 owner 被误认为仍活跃。不能以超时直接重发未决通知；应 fail closed，并明确锁恢复/人工处理语义。
-- `safe_draft + target_missing` 恢复需要保留此前安全证据，重新打开目标后必须先可靠检查真实用户气泡。读取历史失败不能当作“未发送”，不能从缺少目标标签推出安全重发。
+- Bootstrap 只通过只读 health probe 检查浏览器/CDP；`healthState` 与每条投递事实分离。对健康探测有硬 deadline，离线周期最多启动一次，不导航既有任务聊天。heartbeat readiness 的 scope 是 transport，不能代表某目标已登录、输入框有效或消息已送达。
+- Delivery 优先使用结构校验并冻结的 `wake_target`。无目标标签时创建独立标签，禁止把其他聊天导航成目标。只有明确 legacy binding 才使用旧全局目标，不推测来源 URL。
+- 同进程按 CDP 端口共享发送队列；使用同一官方 Outbox 文件的不同进程使用独立 submission 文件锁串行整个提交事务。短读改写锁与长提交锁分开，提交期间的 progress 持久化不会自身死锁。
+- 持久阶段为 `queued → draft_verified → submit_attempted → message_visible → transport_acked`。`submit_attempted` 是点击前的 durable intent（写前日志）：它可能存在于后续 guard 阻止真实点击的记录中，不能单凭该字段证明按钮已点击。确认实际投递只认目标会话中的明确用户气泡和完整 project/task/message key 标记。
+- 新阶段以白名单布尔诊断及时间记录持久化；旧 Format 1 记录缺少新字段时保留 null/unknown，不伪造历史。进程在提交意图后退出或发生未知错误，保守进入 uncertain；只读 reconcile 检查实际气泡。
+- 用户已有草稿、预检后新草稿、落盘期间编辑草稿都会阻止发送。可见性读取失败、主 frame/目标变化、发送控件失效或被遮挡均停止提交；无盲目 Enter。
+- 本地通知由 Cloud 接管时保留原页面 key，另存 `cloud_message_key` 进行正式 transport ACK，不因接管重复创建通知。Cloud ACK 重试只重试 ACK，不重复发消息。
+- pending send、uncertain reconcile 和 ACK-only 默认每类最多8次，恢复时间窗口24小时；任一边界触达后保留记录并标记 manual，不伪造成功。safe_draft 的自动恢复额外最多一次；即使目标标签缺失，也必须重新可靠检查目标消息后才能提交。
+- 原始去重凭证及未完成 ACK 记录不再按2000条裁剪。Windows唯一有效备份保留到新canonical落地；两次崩溃也不丢已落盘凭证。
+- `orchestrator_handled` 始终为 null，Connector 无权以 transport ACK 推断 ChatGPT 已消费项目事件。业务消费由实际读取结果、持久化下一步决定和 `ack_project_event` 证明。
+
+当前实际保证是持久去重、提交未决保守保留、有限安全草稿恢复、目标可见后 ACK 和业务幂等。浏览器与 Outbox 没有共享事务，不能承诺端到端 exactly-once，也不保证所有客户端必然被 UI 通知恢复。
+
+## 剩余限制与未知
+
+- 对其他活跃进程复用旧 PID 的情况无法跨平台充分证明身份；发送/ACK保持claimed并在生命周期触界后标记manual，不能危险重发。同PID的不同进程代际用owner token区分。同进程插件重载遗留任务也不能凭新实例就认定崩溃。
+- 普通文件锁等待最多10秒，无法安全判定owner时返回busy。若进程恰好崩溃在清理死锁的 `.recovery` guard 阶段，后续fail closed，可能需要人工检查guard；不能自动删锁掩盖所有权不明。锁失败发生在claim前，不计入实际发送attempts。
+- 跨进程提交互斥仅覆盖同一个官方Outbox文件。不同Outbox文件共享一个CDP浏览器、外部CDP客户端及人工同时操作不在跨进程互斥保证内；使用不同文件来绕开锁不受支持。
 - 进程可能在点击后、落盘前退出；UI 与 Outbox 不共享事务，因此无法承诺端到端 exactly-once。
 - CDP 只检查当前加载的目标消息区域，历史消息加载及不同客户端是否恢复编排仍需真机验收。
-- 草稿和提交阶段需通过 `onProgress` 在点击前持久化；旧记录没有阶段证据时必须保留 unknown，不伪造历史。
+- 浏览器在最终观察和输入动作间仍可能变化。源码已缩小窗口并fail closed，但UI自动化不能提供平台级事务或保证所有客户端行为。
+- 去重凭证不再裁剪，长期Outbox文件会增长；将来需独立持久凭证存储，不能先删历史再宣称永久去重。
 - 生产 Site 的来源元数据捕获与 immutable binding 实现不在当前 Connector 仓库中，尚未完成实现级审计。
+
+独立Agent对冻结后的关键路径进行了只读审查，最后一行保护补丁亦签收；在本轮所查路径中没有剩余已证实的代码blocking issue。这不是全面正确性证明，亦不能替代真实验收。
+
+## 测试证据与性质
+
+交付目录：`E:\项目\dw-p0-delivery-20261009-codex`。
+
+| 验证 | 结果 | 证据/性质 |
+|---|---|---|
+| Bridge/Bootstrap阶段全量 | 349/349通过 | `bridge-bootstrap-349-tests.log`，模拟CDP与本地单元测试 |
+| 首次统一集成全量（bf7afa2） | 370/370通过，0失败/跳过/取消 | `unified-tests.log` |
+| 最后协议保护补丁合并后定向（e89bd70） | 54/54通过 | `final-protocol-tests.log` |
+| 最终统一全量（e89bd70，最终执行源码） | 370/370通过，0失败/跳过/取消，约45.4秒 | `final-unified-tests.log`；后续候选提交仅补交付文档，执行源码与该测试快照相同 |
+| 进程退出/互斥/备份恢复 | 真实测试子进程已覆盖 | 双进程提交最大并发1、三个进程并发写入、提交意图后退出、唯一备份二次崩溃；浏览器仍是模拟 |
+| 真实浏览器、真实通知气泡 | 未执行 | 没有安装后的真实消息证据 |
+| ChatGPT读取结果及业务ACK | 未执行 | 核心闭环尚未验收 |
 
 ## 只读线上/本地证据
 
@@ -83,10 +125,10 @@ A/B/C 按用户指定顺序 cherry-pick，均无文本冲突：
 
 ## 继续执行顺序
 
-1. 完成各自未提交修复与有意义的定向测试；独立审查发现项必须确认已修或列为阻塞。
-2. integration/protocol Agent 本地提交，协议提交 cherry-pick 到统一集成分支。
-3. 主控审查最终接口、持久阶段、安全恢复、互斥及 ACK key；在合并后运行全量测试。
-4. 保存测试输出，制作固定提交的本地候选包、源码指纹和安装核对清单。包必须来自提交快照，不能打包 Agent 仍在编辑的工作目录。
+1. 阅读本文与 `docs/p0-platform-boundaries.md`，核对交付目录 `candidate-receipt.json` 的候选SHA、源码指纹和测试日志；重新查看git状态，不重做已经完成的A/B/C集成。
+2. 本地代码已集成、定向与独立审查完成；最终统一测试及候选包的状态以receipt为准。若缺少receipt，先完成这一收尾，不把阶段性结果认定为最终构建。
+3. 候选提交尚未push，未创建远程发布。不要尝试从官方GitHub安装一个尚不可获取的本地SHA。先确认官方Manager如何获取这一精确个人试用候选；未经用户授权，不采用裸覆盖或隐式发布。
+4. 包来自固定提交快照。源码指纹按实际字节计算，Git工作树CRLF与归档LF可能有不同值；以安装的精确包字节对应指纹比较，不能把换行差异直接断言为代码回滚。源码版本、磁盘字节、模块加载时冻结的运行指纹仍必须分别核对。
 5. 取得官方安装入口后，先备份 Connector、profile 配置/lock 和 Outbox；安装精确候选提交。记录结果并让用户在任务结束后重启。
 6. 核对 loaded commit/build fingerprint 与候选包一致，再在新 Project 中绑定用户确认的专用聊天，发唯一任务/MESSAGE_KEY。任务提交后结束编排回合，不让 ChatGPT 持续轮询。
 7. 保存真实气泡、transport ACK、实际读取结果、后续决定和 `ack_project_event` 的证据。缺少第二聊天则真实 A/B 门槛仍未通过。
@@ -97,4 +139,4 @@ A/B/C 按用户指定顺序 cherry-pick，均无文本冲突：
 
 ## 发布结论
 
-**当前 NO-GO。** 本地代码/模拟验证尚未完成统一验收，正式安装和真实消费闭环都没有通过。即使模拟测试最终全绿，也不能改变此结论，直到真实验收证据补齐。
+**当前 NO-GO。** 本地代码与模拟验证已显著完善，但官方安装、安装后的真实运行证明和真实消费闭环尚未通过，也没有第二个真实聊天用于A/B验收。模拟全绿不能改变此结论，直到真实验收证据补齐。
