@@ -43,6 +43,7 @@ import { ChatBridgeController, bridgeReady } from "./lib/chat-bridge.mjs";
 import { BridgeWakeOutbox } from "./lib/bridge-outbox.mjs";
 import { WakeCoordinator } from "./lib/wake-coordinator.mjs";
 import { WakeTransport } from "./lib/wake-transport.mjs";
+import { runBridgeBootstrap } from "./lib/bridge-bootstrap.mjs";
 import {
   AutoUpdateController,
   CONNECTOR_VERSION,
@@ -165,7 +166,7 @@ function initialRuntime() {
     activeTaskCount: 0,
     maxConcurrentTasks: 24,
     bridgeBrowser: "unknown",
-    bridgeState: "unbound",
+    bridgeState: "uninitialized",
     bridgeLastEventId: null,
     bridgeLastMessageKey: null,
     bridgeLastSentAt: null,
@@ -281,6 +282,27 @@ export class WorkerControlService extends TypertRemoteService {
         await transport;
       };
     }, "deepseek-worker-connector: wake transport");
+
+    ctx.effect(() => {
+      const lifecycle = new AbortController();
+      const bootstrap = runBridgeBootstrap({
+        bridge: this.bridge,
+        getConfig: () => currentConfig(this.input),
+        onReady: () => this.wakeTransport.kick(),
+        logger: ctx.logger,
+        signal: lifecycle.signal,
+      }).catch((error) => {
+        if (!lifecycle.signal.aborted) {
+          this.runtime.bridgeState = "error";
+          this.runtime.bridgeLastError = "Chat Bridge bootstrap stopped unexpectedly.";
+          ctx.logger.warn("deepseek-worker Chat Bridge bootstrap stopped: %s", redactSecret(error));
+        }
+      });
+      return async () => {
+        lifecycle.abort(new Error("DeepSeek Worker Connector stopped"));
+        await bootstrap;
+      };
+    }, "deepseek-worker-connector: chat bridge bootstrap");
 
     ctx.effect(() => {
       const lifecycle = new AbortController();

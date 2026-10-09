@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,9 +103,13 @@ test("Bridge readiness preserves the wake advertisement contract across bridge s
     chatBridgeEnabled: true,
     chatBridgeChatUrl: "https://chatgpt.com/c/abc",
   };
-  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "idle" }, config), true);
+  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "idle" }, config), false);
   assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "sent" }, config), true);
   assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "ready" }, config), true);
+  assert.equal(bridgeReady({ bridgeBrowser: "unknown", bridgeState: "uninitialized" }, config), false);
+  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "uninitialized" }, config), false);
+  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "needs-login" }, config), false);
+  assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "error" }, config), false);
   assert.equal(bridgeReady({ bridgeBrowser: "unavailable", bridgeState: "error" }, config), false);
   assert.equal(bridgeReady({ bridgeBrowser: "online", bridgeState: "ready" }, {
     chatBridgeEnabled: true,
@@ -114,6 +119,73 @@ test("Bridge readiness preserves the wake advertisement contract across bridge s
     chatBridgeEnabled: true,
     chatBridgeChatUrl: "",
   }), false);
+});
+
+test("Public Bridge status distinguishes disabled, unbound, uninitialized, login, ready, and error", () => {
+  const config = { chatBridgeEnabled: true, chatBridgeChatUrl: "https://chatgpt.com/c/abc" };
+  assert.equal(bridgePublicState({ bridgeBrowser: "unknown" }, config).state, "uninitialized");
+  assert.equal(bridgePublicState({}, { chatBridgeEnabled: true, chatBridgeChatUrl: "" }).state, "unbound");
+  assert.equal(bridgePublicState({}, { chatBridgeEnabled: false, chatBridgeChatUrl: "" }).state, "disabled");
+  assert.equal(bridgePublicState({}, { ...config, chatBridgeDebugPort: 80 }).state, "invalid-config");
+  assert.equal(bridgePublicState({ bridgeState: "needs-login" }, config).state, "needs-login");
+  assert.equal(bridgePublicState({ bridgeState: "ready" }, config).state, "ready");
+  assert.equal(bridgePublicState({ bridgeState: "error" }, config).state, "error");
+});
+
+test("browser spawn errors become a controlled Bridge failure without leaking paths", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("CDP not available"); };
+  const runtime = {};
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.unref = () => {};
+  const controller = new ChatBridgeController({
+    runtime,
+    getConfig: () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: "https://chatgpt.com/c/abc", chatBridgeDebugPort: 9223 }),
+    findBrowserExecutable: () => "C:\\private\\missing-browser.exe",
+    spawnBrowser: () => {
+      queueMicrotask(() => child.emit("error", Object.assign(new Error("spawn C:\\private\\missing-browser.exe"), { code: "ENOENT" })));
+      return child;
+    },
+  });
+  try {
+    await assert.rejects(controller.ensureBrowser(), (error) => error.code === "bridge_browser_spawn_failed");
+    assert.equal(runtime.bridgeBrowser, "unavailable");
+    assert.equal(runtime.bridgeState, "error");
+    assert.doesNotMatch(runtime.bridgeLastError, /private|missing-browser/iu);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("concurrent browser bootstrap reuses one isolated browser launch", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    if (fetchCalls === 1) throw new Error("CDP not available");
+    return { ok: true, json: async () => ({ webSocketDebuggerUrl: "ws://127.0.0.1:9223/devtools/browser/test" }) };
+  };
+  let spawnCalls = 0;
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.unref = () => {};
+  const controller = new ChatBridgeController({
+    runtime: {},
+    getConfig: () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: "https://chatgpt.com/c/abc", chatBridgeDebugPort: 9223 }),
+    findBrowserExecutable: () => "C:\\test\\chrome.exe",
+    spawnBrowser: () => { spawnCalls += 1; return child; },
+  });
+  try {
+    const results = await Promise.all([controller.ensureBrowser(), controller.ensureBrowser()]);
+    assert.equal(results[0].version.webSocketDebuggerUrl, "ws://127.0.0.1:9223/devtools/browser/test");
+    assert.equal(results[1].version.webSocketDebuggerUrl, "ws://127.0.0.1:9223/devtools/browser/test");
+    assert.equal(spawnCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Controller deduplicates an already-sent message key before any browser access", async () => {
@@ -281,6 +353,30 @@ test("Bridge test marks ready only after bound composer check and never sends", 
   assert.ok(expressions.some((expression) => expression.includes("authRequired")), "login state script must run");
   assert.ok(expressions.some((expression) => expression.includes("composer_not_found")), "composer check must run");
   for (const expression of expressions) assert.doesNotThrow(() => new Function(expression));
+});
+
+test("Bridge validation returns promptly when shutdown aborts a pending CDP request", async () => {
+  const controllerAbort = new AbortController();
+  let sendStarted;
+  const waitingForSend = new Promise((resolve) => { sendStarted = resolve; });
+  let closeCount = 0;
+  const controller = new ChatBridgeController({
+    runtime: {},
+    getConfig: () => ({ chatBridgeEnabled: true, chatBridgeChatUrl: "https://chatgpt.com/c/bound", chatBridgeDebugPort: 9223 }),
+    cdpFactory: () => ({
+      open: async () => {},
+      send: () => { sendStarted(); return new Promise(() => {}); },
+      close: () => { closeCount += 1; },
+    }),
+  });
+  controller.ensureBrowser = async () => ({ version: { webSocketDebuggerUrl: "ws://fake" } });
+  const validation = controller.testBridge({ signal: controllerAbort.signal });
+  await waitingForSend;
+  controllerAbort.abort(new Error("shutdown"));
+  await assert.rejects(validation, /shutdown/);
+  assert.ok(closeCount >= 1, "abort closes the socket before final cleanup");
+  assert.equal(controller.runtime.bridgeState, "uninitialized");
+  assert.equal(controller.runtime.bridgeLastError, null);
 });
 
 test("Bridge test waits for a composer rendered after initial checks", async () => {
