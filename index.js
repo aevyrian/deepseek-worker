@@ -45,6 +45,13 @@ import { WakeCoordinator } from "./lib/wake-coordinator.mjs";
 import { WakeTransport } from "./lib/wake-transport.mjs";
 import { runBridgeBootstrap } from "./lib/bridge-bootstrap.mjs";
 import {
+  DEFAULT_MAX_RECORDS,
+  TaskNotificationStore,
+  summarizeError,
+  summarizeResult,
+  taskNotificationsPath,
+} from "./lib/task-notifications.mjs";
+import {
   AutoUpdateController,
   CONNECTOR_VERSION,
   createUpdateRuntime,
@@ -306,7 +313,7 @@ export class WorkerControlService extends TypertRemoteService {
 
     ctx.effect(() => {
       const lifecycle = new AbortController();
-      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal, this.wakeCoordinator, this.claimGate).catch((error) => {
+      const worker = runWorker(ctx, input, this.runtime, lifecycle.signal, this.wakeCoordinator, this.claimGate, currentTaskNotificationStore(ctx)).catch((error) => {
         if (!lifecycle.signal.aborted) {
           ctx.logger.error("deepseek-worker connector stopped: %s", redactSecret(error));
         }
@@ -773,6 +780,83 @@ export class WorkerControlService extends TypertRemoteService {
       return { ok: false, code: mapped.code, message: mapped.message };
     }
   }
+
+  /**
+   * Local, read-only task-completion notifications. Independent of the Site,
+   * the Chat Bridge, and the ChatGPT binding: it reads the Connector's own
+   * durable file so a finished task stays visible even when no project lease
+   * or wake transport exists.
+   */
+  async taskNotifications() {
+    try {
+      const store = currentTaskNotificationStore(this.ctx);
+      await store.initialize();
+      const items = await store.list({ limit: DEFAULT_MAX_RECORDS });
+      return {
+        items,
+        unreadCount: items.filter((item) => item.read !== true).length,
+        activeTaskCount: Number.isInteger(this.runtime.activeTaskCount) ? this.runtime.activeTaskCount : 0,
+      };
+    } catch (error) {
+      this.ctx.logger?.warn?.("deepseek-worker: task notification read failed: %s", summarizeError(error));
+      return { items: [], unreadCount: 0, activeTaskCount: 0 };
+    }
+  }
+
+  /** Mark notifications read. Omitting `keys` marks every record read. */
+  async markTaskNotificationsRead(options = {}) {
+    try {
+      const store = currentTaskNotificationStore(this.ctx);
+      await store.initialize();
+      const keys = options && typeof options === "object" && !Array.isArray(options) ? options.keys : options;
+      const result = await store.markRead(keys === undefined || keys === null ? {} : { keys });
+      return { ok: true, unreadCount: result.unreadCount };
+    } catch (error) {
+      this.ctx.logger?.warn?.("deepseek-worker: task notification mark-read failed: %s", summarizeError(error));
+      return { ok: false, unreadCount: 0 };
+    }
+  }
+}
+
+let taskNotificationStore = null;
+
+/**
+ * One process-wide store so the RPC surface and every lease handler agree on
+ * the same durable file and the same write queue.
+ */
+function currentTaskNotificationStore(ctx = null) {
+  if (taskNotificationStore === null) {
+    taskNotificationStore = new TaskNotificationStore({
+      filePath: taskNotificationsPath(),
+      logger: ctx?.logger,
+    });
+  }
+  return taskNotificationStore;
+}
+
+export function setTaskNotificationStore(store) {
+  taskNotificationStore = store ?? null;
+}
+
+async function recordTaskNotification(store, { taskId, terminalState, summary = "", error = "" }) {
+  try {
+    return await store.recordTerminal({ taskId, terminalState, summary, error });
+  } catch (notificationError) {
+    store?.logger?.warn?.(
+      "deepseek-worker task %s notification was not recorded locally: %s",
+      taskId,
+      summarizeError(notificationError),
+    );
+    return null;
+  }
+}
+
+function taskNotificationSummary(execution) {
+  try {
+    return summarizeResult(execution?.result);
+  } catch {
+    return "";
+  }
 }
 
 function markRemoteMethod(prototype, methodName) {
@@ -792,13 +876,13 @@ function markRemoteMethod(prototype, methodName) {
   for (const initializer of initializers) initializer.call(receiver);
 }
 
-for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate", "openBridgeBrowser", "testBridge"]) {
+for (const method of ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate", "openBridgeBrowser", "testBridge", "taskNotifications", "markTaskNotificationsRead"]) {
   markRemoteMethod(WorkerControlService.prototype, method);
 }
 
 export default WorkerControlService;
 
-async function runWorker(ctx, input, runtime, signal, wakeCoordinator, claimGate) {
+async function runWorker(ctx, input, runtime, signal, wakeCoordinator, claimGate, notifier = null) {
   let registeredToken;
   let registeredSignature = "";
   let lastHeartbeatAt = 0;
@@ -960,7 +1044,7 @@ async function runWorker(ctx, input, runtime, signal, wakeCoordinator, claimGate
       await fillTaskPool(
         activeTasks,
         () => workerRequest(config, token, "claim", {}, signal),
-        (task) => processLease(ctx, config, token, task, signal, wakeCoordinator),
+        (task) => processLease(ctx, config, token, task, signal, wakeCoordinator, notifier),
         signal,
         claimGate,
       );
@@ -997,10 +1081,11 @@ async function sleep(ms, signal) {
   }
 }
 
-export async function processLease(ctx, config, token, task, outerSignal, wakeCoordinator = null) {
+export async function processLease(ctx, config, token, task, outerSignal, wakeCoordinator = null, notifier = null) {
   const leaseAbort = new AbortController();
   const relayAbort = () => leaseAbort.abort(outerSignal.reason);
   outerSignal.addEventListener("abort", relayAbort, { once: true });
+  const notifications = notifier ?? currentTaskNotificationStore(ctx);
   let leaseLost = false;
   const renewer = renewLease(config, token, task.id, leaseAbort.signal).catch((error) => {
     leaseLost = true;
@@ -1034,6 +1119,11 @@ export async function processLease(ctx, config, token, task, outerSignal, wakeCo
           return null;
         });
         if (failure) {
+          await recordTaskNotification(notifications, {
+            taskId: task.id,
+            terminalState: "failed",
+            error: summarizeError(redactSecret(error, token)),
+          });
           await enqueueTerminalWake(ctx, config, failure, wakeCoordinator, {
             taskId: task.id,
             task: { project_id: task.project_id, wake_target: task.wake_target, ...(task.legacy_binding === true ? { legacy_binding: true } : {}) },
@@ -1059,6 +1149,11 @@ export async function processLease(ctx, config, token, task, outerSignal, wakeCo
       return null;
     });
     if (result) {
+      await recordTaskNotification(notifications, {
+        taskId: task.id,
+        terminalState: "completed",
+        summary: taskNotificationSummary(execution),
+      });
       await enqueueTerminalWake(ctx, config, result, wakeCoordinator, {
         taskId: task.id,
         task: { project_id: task.project_id, wake_target: task.wake_target, ...(task.legacy_binding === true ? { legacy_binding: true } : {}) },
