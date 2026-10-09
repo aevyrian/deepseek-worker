@@ -556,6 +556,11 @@ test("official incompatibility result is surfaced without replacing runtime stat
 });
 
 test("manual update check remains available when auto-update is disabled and never installs", async () => {
+  // The fixture must stay strictly newer than the running package, so it is
+  // derived from CONNECTOR_VERSION instead of being pinned to a literal that a
+  // future version bump would overtake.
+  const [major, minor, patch] = CONNECTOR_VERSION.split(".").map((part) => Number(part));
+  const newerVersion = `${major}.${minor}.${patch + 1}`;
   let packageCalls = 0;
   const runtime = createUpdateRuntime();
   const status = await performUpdateCheck({
@@ -566,13 +571,13 @@ test("manual update check remains available when auto-update is disabled and nev
     fetchImpl: async (url) => String(url).endsWith("/api/connector/latest")
       ? response(manifest("0.6.0"))
       : String(url).includes("/releases?")
-      ? response([{ tag_name: "v0.7.13", draft: false, prerelease: false }])
+      ? response([{ tag_name: `v${newerVersion}`, draft: false, prerelease: false }])
       : String(url).includes("/tags?")
-        ? response([{ name: "v0.7.13" }])
+        ? response([{ name: `v${newerVersion}` }])
           : response(null, 404),
   });
   assert.equal(status.updateState, "available");
-  assert.equal(status.latestVersion, "0.7.13");
+  assert.equal(status.latestVersion, newerVersion);
   assert.equal(status.updateSource, "github-releases");
   assert.ok(status.lastCheckedAt);
   assert.equal(packageCalls, 0, "checking updates must not call the Plugin Manager");

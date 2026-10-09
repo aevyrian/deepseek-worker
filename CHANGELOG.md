@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased — Chat Bridge Submit Reliability
+## 0.7.13 — P0 Reliability Preview
+
+> **Prerelease — NOT a stable release.** This is the P0 Reliability Preview for the Chat Bridge wake path. The fixes below are covered by 370/370 simulated tests, but real end-to-end acceptance (real target conversation message, real ChatGPT result consumption and `ack_project_event`) has **not** been validated, so this release is **NO-GO for stable** and is published as a GitHub prerelease only. Installing it replaces the running Connector generation: **a Harness restart is required before the new build is loaded.** Do not treat it as an A/B-verified release.
 
 - Align send and reconcile on one conversation identity: trailing slashes, harmless query parameters, a `www.` host and the `/g/<project>/c/<id>` spelling of the same conversation id all resolve to the same target, while a different conversation id, the home page, an auth page and non-HTTPS URLs fail closed. `reconcileDelivery` no longer reports `target_missing` for a tab that is open under a cosmetic URL variant.
 - Keep `wake_target` above the global `chatBridgeChatUrl` in both paths, and keep reconciliation strictly read-only: it never navigates, never inserts, never clicks, never opens a tab to search, and stops with an explicit reason instead of risking the current draft.
@@ -9,6 +11,16 @@
 - Wait for page hydration and a stable toolbar (up to 15s, three identical reads) before clicking, never click while the conversation is still generating or a stale Stop control is on screen, and extend post-click confirmation to 6s. A confirmation timeout still holds the `MESSAGE_KEY` for read-only reconciliation and never submits twice.
 - Enrich delivery diagnostics with draft retention, draft insertions, send-control presence and enabled state, submit attempt, conversation visibility and manual-intervention flags, and persist the reconcile-side fields without a database migration.
 - Add regression coverage for label-only and disabled real DOM send buttons, slow hydration, dropped-draft re-insertion, in-progress generation, lookalike `Send feedback` controls, `target_missing` plus URL variants, wrong-chat fail-closed targeting, `wake_target` precedence, single bounded safe-draft recovery, non-retained drafts and confirmation-timeout holds.
+
+Scope of this preview, in the order the wake path runs:
+
+- **Bootstrap browser health only** — the startup health check no longer depends on, or disturbs, the bound conversation.
+- **No tab stealing** — reconciliation and target lookup are strictly read-only and never navigate, insert, click or open a tab.
+- **`wake_target` as an independent target** — a per-delivery wake target outranks the global `chatBridgeChatUrl` instead of being merged with it.
+- **Draft protection** — no blind Enter fallback; a verified draft is retained rather than submitted through an unverified control, with a single bounded safe-draft recovery.
+- **Outbox phase crash recovery** — persisted sanitized phase diagnostics plus in-place record extension let an interrupted delivery be reconciled after restart instead of blindly resent.
+- **Dedupe, ACK identity and bounded retries** — one conversation identity across send and reconcile, a durable short lease, bounded exponential retry, and Cloud acknowledgement retried independently of the message.
+- **370/370 simulated tests pass**; real end-to-end A/B acceptance and ChatGPT `ack_project_event` remain unverified.
 
 ## 0.7.12 — Trusted Self-Update Source Recovery
 
