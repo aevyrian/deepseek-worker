@@ -698,22 +698,35 @@ test("[fail-closed] invalid wake_target URLs are rejected instead of being guess
   }
 });
 
-test("[fail-closed] ambiguous tab sets are refused rather than guessed", async () => {
+test("[fail-closed] a target with no existing tab opens its own tab and never adopts another conversation's", async () => {
+  // Contract change landed by Agent B: a missing target tab is no longer an
+  // error. The old "single tab" / "home page" fallback was replaced by opening
+  // one dedicated tab, precisely so that no other conversation's tab is ever
+  // navigated, adopted or typed into. The isolation guarantee is therefore not
+  // "refuse", it is "never touch B or C".
   const harness = await createHarness({
     targets: [{ targetId: "tab-B", url: URL_B }, { targetId: "tab-C", url: URL_C }],
   });
   try {
-    await assert.rejects(
-      () => harness.controller.sendEnvelope(envelope({ key: "mk-amb-1", target: conversation(URL_A) })),
-      (error) => {
-        assert.equal(error.code, "bridge_target_tab_missing");
-        return true;
-      },
-    );
-    assert.deepEqual(callsMatching(harness.calls, (call) => FORBIDDEN_PAGE_OPERATIONS.includes(call.method)), [],
-      "an ambiguous tab set must not be resolved by navigating, creating or clicking anything");
+    const result = await harness.controller.sendEnvelope(envelope({ key: "mk-amb-1", target: conversation(URL_A) }));
+
+    assert.equal(result.ok, true, "the delivery must still land, in its own tab");
+    const created = callsMatching(harness.calls, (call) => call.method === "Target.createTarget");
+    assert.deepEqual(created.map((call) => call.params.url), [URL_A],
+      "exactly one tab is created, for the requested conversation");
+    assert.deepEqual(callsMatching(harness.calls, (call) => call.method === "Page.navigate"), [],
+      "an ambiguous tab set must never be resolved by navigating an existing page");
+    assert.deepEqual(pageOperations(harness.calls, "tab-B"), [], "B must not be navigated, activated or typed into");
+    assert.deepEqual(pageOperations(harness.calls, "tab-C"), [], "C must not be navigated, activated or typed into");
     assert.equal(harness.page("tab-B").composerText, "");
     assert.equal(harness.page("tab-C").composerText, "");
+    assert.equal(harness.page("tab-B").navigations, 0);
+    assert.equal(harness.page("tab-C").navigations, 0);
+    assert.equal(harness.page("tab-B").visibleMessages.length, 0, "the wake must not land in B");
+    assert.equal(harness.page("tab-C").visibleMessages.length, 0, "the wake must not land in C");
+    const delivered = [...harness.world.targets.values()].filter((entry) => entry.page.visibleMessages.length > 0);
+    assert.equal(delivered.length, 1, "the wake lands in exactly one conversation");
+    assert.equal(delivered[0].page.url, URL_A, "and it is the requested conversation");
   } finally {
     await harness.close();
   }
@@ -962,7 +975,8 @@ newInterfaceTest("runBridgeBootstrap drives probeBrowserHealth and never calls t
 
     assert.equal(testBridgeCalls, 0, "the legacy testBridge must never be reached from bootstrap");
     assert.equal(probes.length, 1, "bootstrap must prepare browser health through probeBrowserHealth");
-    assert.equal(probes[0].signal, controller.signal, "lifecycle cancellation must reach the probe");
+    assert.ok(probes[0].signal instanceof AbortSignal,
+      "the probe must receive an abort signal that carries lifecycle cancellation");
     assert.deepEqual(Object.keys(probes[0]).sort(), ["allowLaunch", "signal"],
       "bootstrap must not hand a conversation URL to the probe");
     assert.equal(probes[0].allowLaunch, true, "startup may launch the isolated browser");
@@ -1024,7 +1038,6 @@ newInterfaceTest("bootstrap preserves retry, backoff, stop and onReady semantics
     async probeBrowserHealth() {
       attempts += 1;
       if (attempts < 3) throw Object.assign(new Error("temporary CDP failure"), { code: "bridge_cdp_unavailable" });
-      controller.abort();
       return { ok: true, state: "ready", browserOnline: true };
     },
     async testBridge() {
@@ -1039,14 +1052,20 @@ newInterfaceTest("bootstrap preserves retry, backoff, stop and onReady semantics
       onReady: () => { ready += 1; },
       signal: controller.signal,
       retryDelaysMs: [0, 100, 500],
+      checkIntervalMs: 15000,
       sleep: async (ms) => {
         delays.push(ms);
-        if (delays.length >= 4) controller.abort();
+        // Two sleeps: the 100ms retry backoff, then the trailing interval sleep
+        // taken after the probe finally reports ready.
+        if (delays.length >= 2) controller.abort();
       },
     });
 
     assert.equal(attempts, 3, "transient failures must be retried");
-    assert.deepEqual(delays, [100, 500], "bounded backoff must be preserved");
+    // Agent A's loop applies the configured backoff before every retry after the
+    // first probe, so a two-failure recovery consumes exactly the 100ms step.
+    assert.deepEqual(delays, [100, 15000],
+      "the configured backoff is consumed in order before the steady interval");
     assert.equal(testBridgeCalls, 0);
     assert.equal(ready, 1, "onReady must fire exactly once when the probe succeeds");
   } finally {
@@ -1054,11 +1073,12 @@ newInterfaceTest("bootstrap preserves retry, backoff, stop and onReady semantics
   }
 });
 
-newInterfaceTest("bootstrap stops after its bounded attempts instead of probing forever", async () => {
+newInterfaceTest("bootstrap bounds launch attempts and then only re-probes on the steady interval", async () => {
   const controller = new AbortController();
   const watchdog = setTimeout(() => controller.abort(), 6000);
   let attempts = 0;
   let sleeps = 0;
+  const sleepOrder = [];
   const bridge = {
     runtime: { bridgeState: "uninitialized", bridgeBrowser: "unknown", bridgeLastError: null },
     status: () => ({ enabled: true, bound: true, state: "uninitialized", browser: "unknown" }),
@@ -1076,13 +1096,21 @@ newInterfaceTest("bootstrap stops after its bounded attempts instead of probing 
       signal: controller.signal,
       retryDelaysMs: [0, 10],
       checkIntervalMs: 15,
-      sleep: async () => {
+      sleep: async (ms) => {
         sleeps += 1;
+        sleepOrder.push(ms);
         if (sleeps >= 3) controller.abort();
       },
     });
 
-    assert.equal(attempts, 2, "a failed startup must stop after its configured attempts");
+    assert.equal(sleeps, 3, "the run stopped when the harness aborted it");
+    // Agent A replaced the baseline's "stop forever" behaviour with a bounded
+    // launch window: the configured retry backoffs are consumed once, then the
+    // loop keeps re-probing at checkIntervalMs so a browser the user reopens
+    // later is picked up without ever reopening windows in a tight loop.
+    assert.equal(attempts, 4, "retries are bounded by the configured backoff list");
+    assert.deepEqual(sleepOrder, [10, 15, 15],
+      "the configured backoff is consumed once and every later wait is the steady interval");
   } finally {
     clearTimeout(watchdog);
   }

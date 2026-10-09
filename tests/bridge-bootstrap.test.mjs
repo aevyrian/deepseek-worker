@@ -151,10 +151,15 @@ test("browser online probing does not depend on chatBridgeChatUrl", async () => 
   const controller = new AbortController();
   const fake = fakeBridge({ config: { chatBridgeChatUrl: "" } });
   const { sleep, delays } = abortingSleep(controller, 1);
+  let kicks = 0;
   await runBridgeBootstrap({
     bridge: fake.bridge,
     getConfig: () => fake.settings,
-    onReady: () => { throw new Error("an unbound conversation must not wake the transport"); },
+    // The wake kick is a latency signal for the durable transport, not a
+    // delivery. A wake_target delivery is self-describing, so an unbound global
+    // configuration must still be able to wake the transport the moment the
+    // browser becomes usable; `sendMessage` remains the fail-closed gate.
+    onReady: () => { kicks += 1; },
     signal: controller.signal,
     retryDelaysMs: [0],
     sleep,
@@ -162,7 +167,28 @@ test("browser online probing does not depend on chatBridgeChatUrl", async () => 
   assert.equal(fake.calls.length, 1, "the browser is still brought online without a bound chat URL");
   assert.equal(fake.calls[0].allowLaunch, true);
   assert.equal(fake.runtime.bridgeState, "ready");
+  assert.equal(kicks, 1, "an unbound configuration still wakes the durable transport once");
   assert.deepEqual(fake.navigation, [], "no fallback navigation to a global chat URL");
+});
+
+test("an unbound ready browser still wakes the transport once per transition, not per interval", async () => {
+  const controller = new AbortController();
+  const fake = fakeBridge({ state: "ready", browser: "online", config: { chatBridgeChatUrl: "" } });
+  const { sleep, delays } = abortingSleep(controller, 4);
+  let kicks = 0;
+  await runBridgeBootstrap({
+    bridge: fake.bridge,
+    getConfig: () => fake.settings,
+    onReady: () => { kicks += 1; },
+    signal: controller.signal,
+    retryDelaysMs: [0],
+    checkIntervalMs: 25,
+    sleep,
+  });
+  assert.equal(fake.calls.length, 4, "the loop kept polling health without a global binding");
+  assert.deepEqual(delays, [25, 25, 25, 25]);
+  assert.equal(kicks, 1, "a steady unbound ready state must not re-kick on every interval");
+  assert.deepEqual(fake.navigation, []);
 });
 
 test("disabled and invalid-port configurations do not launch a browser", async () => {
