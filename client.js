@@ -10,15 +10,50 @@ window.__ModuleLoader__.load({
     const ROW_KEY = "deepseek-worker-connector#deepseek-worker-connector";
     const NS = "deepseekWorkerConnector";
 
+    /**
+     * Strict input stand-in for `markTaskNotificationsRead(options)`.
+     *
+     * The prebuilt browser half cannot import a schema factory, and the Host derives the
+     * real wire contract from the service method's own parameter names, so the browser
+     * face only needs a strict codec that mounts: it never decodes its own outbound
+     * argument. `wire` must stay equal to the Host parameter name
+     * (`WorkerControlService.markTaskNotificationsRead(options = {})`) or a `{ keys }`
+     * filter is dropped and the Host marks everything read instead; the no-argument path
+     * is independent of that name.
+     */
+    const TASK_NOTIFICATIONS_READ_OPTIONS = {
+      name: "options",
+      wire: "options",
+      source: "json",
+      codec: {
+        mode: "strict",
+        typeSymbol: "deepseek-worker-connector#taskNotificationsReadOptions",
+        create: () => ({ parse: (value) => (value && typeof value === "object" ? value : {}) }),
+      },
+    };
+
     const contribution = {
       package: "deepseek-worker-connector",
-      descriptors: ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate", "openBridgeBrowser", "testBridge"].map((method) => ({
+      descriptors: [
+        { method: "status" },
+        { method: "generateToken" },
+        { method: "test" },
+        { method: "beginPairing" },
+        { method: "pairingStatus" },
+        { method: "disconnectPairing" },
+        { method: "checkForUpdates" },
+        { method: "forceUpdate" },
+        { method: "openBridgeBrowser" },
+        { method: "testBridge" },
+        { method: "taskNotifications" },
+        { method: "markTaskNotificationsRead", parameters: [TASK_NOTIFICATIONS_READ_OPTIONS] },
+      ].map(({ method, parameters = [] }) => ({
         id: `deepseek-worker-connector#deepseekWorkerConnector/${method}`,
         service: "deepseekWorkerConnectorControl",
         namespace: "deepseekWorkerConnector",
         method,
         invocation: { kind: "direct" },
-        parameters: [],
+        parameters,
         result: { mode: "src-json" },
       })),
     };
@@ -61,18 +96,26 @@ window.__ModuleLoader__.load({
       trustedHint: "已授权 Workspace 内不额外收紧 Harness 权限；实际能力仍由 Harness Profile、工具审批和操作系统决定。",
       restrictedHint: "关闭后暂停远程任务领取。",
       chatBridge: "免费 Chat Bridge",
-      chatBridgeHint: "备用免费通道：任务完成后把一条很短的 [DSW] 控制消息发回你绑定的 ChatGPT 对话；真实结果仍由 ChatGPT 通过 MCP 读取。",
+      chatBridgeHint: "备用免费通道：任务完成后把一条很短的 [DSW] 控制消息发回该任务自己的目标对话；真实结果仍由 ChatGPT 通过 MCP 读取。",
       chatBridgeEnabled: "启用 Chat Bridge",
-      chatBridgeChatUrl: "绑定的 ChatGPT 对话 URL",
-      chatBridgeUrlHint: "复制你希望作为总控的 ChatGPT 对话地址（chatgpt.com）。只保存在本机 Connector 配置中。",
+      chatBridgeChatUrl: "默认聊天地址（仅历史 / 明确 legacy 任务使用）",
+      chatBridgeUrlHint: "只保存在本机 Connector 配置里，作为历史任务或明确指定 legacy 投递时的默认地址。它不会改变已存在 Project 的投递目标：新项目按任务自己的目标聊天投递。",
+      chatBridgeSaveBinding: "保存绑定",
+      chatBridgeSavingBinding: "保存中…",
+      chatBridgeSaved: "已保存到本机 Connector",
+      chatBridgeSavedCleared: "已保存到本机 Connector（默认地址已清空）",
+      chatBridgeVerifyFailed: "保存后校验失败：配置未真正写入本机 Connector，请重试。",
+      chatBridgeUnsaved: "默认地址还有未保存的草稿；点击“保存绑定”才会写入本机 Connector。",
       chatBridgeOpen: "打开桥接浏览器 / 登录 ChatGPT",
       chatBridgeTest: "测试桥接浏览器",
-      chatBridgeBound: "已绑定",
-      chatBridgeUnbound: "未绑定",
       chatBridgeReady: "可用",
       chatBridgeNeedsLogin: "需要登录",
+      chatBridgeUnbound: "未设置目标聊天地址",
       chatBridgeStatus: "桥接状态",
-      chatBridgeBinding: "对话绑定",
+      chatBridgeBinding: "本机默认地址绑定",
+      chatBridgeDefaultSet: "已设置默认地址",
+      chatBridgeDefaultUnset: "未设置默认地址",
+      chatBridgeRoutingHint: "本机默认地址只影响历史或明确指定 legacy 的任务；新项目按任务自己的目标聊天投递。",
       chatBridgeIdle: "未测试",
       chatBridgeChecking: "检查中",
       chatBridgeSending: "发送中",
@@ -82,6 +125,21 @@ window.__ModuleLoader__.load({
       chatBridgeInvalidUrl: "请输入有效的 HTTPS ChatGPT 对话 URL。",
       chatBridgeInvalidPort: "桥接浏览器端口必须在 1024–65535 之间。",
       chatBridgeUnavailable: "Chat Bridge 暂不可用。",
+      taskNotifications: "任务通知",
+      taskNotificationsHint: "本机 Connector 记录的完成 / 失败任务通知，只保存在本机（保留最近 100～200 条），重启后仍然保留。",
+      taskNotificationsLoading: "正在读取任务通知…",
+      taskNotificationsUnread: "未读",
+      taskNotificationsActive: "运行中的任务",
+      taskNotificationsActiveHint: "只表示当前正在运行的远程任务数量，不代表进度比例。",
+      taskNotificationsEmpty: "暂无任务通知。",
+      taskNotificationsUnavailable: "任务通知暂不可用（Host Remote）。",
+      taskNotificationsMarkAll: "全部标记已读",
+      taskNotificationsMarking: "标记中…",
+      taskNotificationsMarkedAll: "已全部标记已读。",
+      taskNotificationsMarkFailed: "标记已读失败，请重试。",
+      taskNotificationsCompleted: "已完成",
+      taskNotificationsFailed: "失败",
+      taskNotificationsLocalOnly: "这是插件内置的通知中心；未使用操作系统原生通知。",
       advanced: "高级 / 诊断",
       endpoint: "Cloud Endpoint",
       workerId: "Worker ID",
@@ -173,18 +231,26 @@ window.__ModuleLoader__.load({
       trustedHint: "Inside selected Workspaces the Connector adds no second permission layer; Harness and OS permissions still apply.",
       restrictedHint: "Disables remote task claiming.",
       chatBridge: "Free Chat Bridge",
-      chatBridgeHint: "Free fallback: injects a tiny [DSW] control message into the bound ChatGPT chat; ChatGPT still reads real results through MCP.",
+      chatBridgeHint: "Free fallback: injects a tiny [DSW] control message into each task's own target chat; ChatGPT still reads real results through MCP.",
       chatBridgeEnabled: "Enable Chat Bridge",
-      chatBridgeChatUrl: "Bound ChatGPT chat URL",
-      chatBridgeUrlHint: "Paste the chatgpt.com conversation URL used as the root orchestrator. Stored only in local Connector config.",
+      chatBridgeChatUrl: "Default chat URL (history / explicit legacy tasks only)",
+      chatBridgeUrlHint: "Stored only in this machine's Connector config, as the default target for history or explicitly legacy deliveries. It does not change the routing of existing Projects: new projects deliver to each task's own target chat.",
+      chatBridgeSaveBinding: "Save binding",
+      chatBridgeSavingBinding: "Saving…",
+      chatBridgeSaved: "Saved to this machine's Connector",
+      chatBridgeSavedCleared: "Saved to this machine's Connector (default chat URL cleared)",
+      chatBridgeVerifyFailed: "Post-save verification failed: the setting was not persisted to this machine's Connector. Try again.",
+      chatBridgeUnsaved: "The default chat URL has unsaved edits; only \"Save binding\" writes them to this machine's Connector.",
       chatBridgeOpen: "Open bridge browser / sign in",
       chatBridgeTest: "Test bridge browser",
-      chatBridgeBound: "Bound",
-      chatBridgeUnbound: "Not bound",
       chatBridgeReady: "Ready",
       chatBridgeNeedsLogin: "Sign-in required",
+      chatBridgeUnbound: "No target chat URL",
       chatBridgeStatus: "Bridge status",
-      chatBridgeBinding: "Chat binding",
+      chatBridgeBinding: "Local default binding",
+      chatBridgeDefaultSet: "Default chat URL set",
+      chatBridgeDefaultUnset: "No default chat URL",
+      chatBridgeRoutingHint: "The local default chat URL only affects history or explicitly legacy tasks; new projects deliver to each task's own target chat.",
       chatBridgeIdle: "Not tested",
       chatBridgeChecking: "Checking",
       chatBridgeSending: "Sending",
@@ -194,6 +260,21 @@ window.__ModuleLoader__.load({
       chatBridgeInvalidUrl: "Enter a valid HTTPS ChatGPT conversation URL.",
       chatBridgeInvalidPort: "Bridge browser port must be between 1024 and 65535.",
       chatBridgeUnavailable: "Chat Bridge is unavailable.",
+      taskNotifications: "Task notifications",
+      taskNotificationsHint: "Completion / failure notices recorded by this machine's Connector. Local only (keeps the latest 100–200), survives restarts.",
+      taskNotificationsLoading: "Loading task notifications…",
+      taskNotificationsUnread: "Unread",
+      taskNotificationsActive: "Running tasks",
+      taskNotificationsActiveHint: "A plain count of running remote tasks — not a progress ratio.",
+      taskNotificationsEmpty: "No task notifications yet.",
+      taskNotificationsUnavailable: "Task notifications are unavailable (Host Remote).",
+      taskNotificationsMarkAll: "Mark all read",
+      taskNotificationsMarking: "Marking…",
+      taskNotificationsMarkedAll: "All notifications marked read.",
+      taskNotificationsMarkFailed: "Could not mark notifications read. Try again.",
+      taskNotificationsCompleted: "Completed",
+      taskNotificationsFailed: "Failed",
+      taskNotificationsLocalOnly: "This is the plugin's built-in notification centre; no OS-native notification is used.",
       advanced: "Advanced / Diagnostics",
       token: "Manual Worker Token",
       setToken: "Enter compatibility Token",
@@ -382,30 +463,79 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** A bindable default chat target is only ever an HTTPS chatgpt.com conversation URL. */
+    const CHAT_CONVERSATION_PATH = /^\/(?:g\/[A-Za-z0-9_-]+\/)?c\/[A-Za-z0-9_-]+$/u;
+
+    function isBindableChatUrl(value) {
+      if (typeof value !== "string" || !value.trim()) return false;
+      let url;
+      try { url = new URL(value.trim()); } catch { return false; }
+      if (url.protocol !== "https:") return false;
+      if (url.username || url.password) return false;
+      if (!["chatgpt.com", "www.chatgpt.com"].includes(url.hostname.toLowerCase())) return false;
+      return CHAT_CONVERSATION_PATH.test(url.pathname);
+    }
+
+    /** Normalize the three local Chat Bridge fields; anything else stays untouched. */
+    function normalizeBridgeSettings(draft, t) {
+      const chatBridgeChatUrl = String(draft?.chatBridgeChatUrl || "").trim();
+      if (chatBridgeChatUrl && !isBindableChatUrl(chatBridgeChatUrl)) throw new Error(t("chatBridgeInvalidUrl"));
+      const chatBridgeDebugPort = Number(draft?.chatBridgeDebugPort);
+      if (!Number.isInteger(chatBridgeDebugPort) || chatBridgeDebugPort < 1024 || chatBridgeDebugPort > 65535) {
+        throw new Error(t("chatBridgeInvalidPort"));
+      }
+      return { chatBridgeEnabled: draft?.chatBridgeEnabled !== false, chatBridgeChatUrl, chatBridgeDebugPort };
+    }
+
+    function bridgeSettingsMatch(value, settings) {
+      if (!value || typeof value !== "object") return false;
+      return (value.chatBridgeEnabled !== false) === settings.chatBridgeEnabled
+        && String(value.chatBridgeChatUrl ?? "").trim() === settings.chatBridgeChatUrl
+        && Number(value.chatBridgeDebugPort) === settings.chatBridgeDebugPort;
+    }
+
+    /**
+     * Write only the three local Chat Bridge fields, then confirm the form snapshot
+     * really carries them: a resolved mutate that left the draft-only React state in
+     * place must not be reported as a persisted binding.
+     */
+    async function persistBridgeSettings({ form, draft, t }) {
+      if (!form?.state?.writable || typeof form.mutate !== "function") throw new Error(t("saveFailed"));
+      const settings = normalizeBridgeSettings(draft, t);
+      const saved = await form.mutate([
+        { op: "set", path: ["chatBridgeEnabled"], value: settings.chatBridgeEnabled },
+        { op: "set", path: ["chatBridgeChatUrl"], value: settings.chatBridgeChatUrl },
+        { op: "set", path: ["chatBridgeDebugPort"], value: settings.chatBridgeDebugPort },
+      ], form.state.revision);
+      if (!saved) throw new Error(t("saveFailed"));
+      const persisted = form.state?.value;
+      if (persisted && typeof persisted === "object" && !bridgeSettingsMatch(persisted, settings)) {
+        throw new Error(t("chatBridgeVerifyFailed"));
+      }
+      return settings;
+    }
+
+    /**
+     * Save the local default chat binding only. It never opens or tests the bridge
+     * browser, never sends a message, and never re-routes an existing Project: the
+     * local default is not a Site-side per-project wake target.
+     */
+    async function saveBridgeBinding({ form, draft, setMessage, t }) {
+      setMessage("");
+      try {
+        const settings = await persistBridgeSettings({ form, draft, t });
+        setMessage(settings.chatBridgeChatUrl ? t("chatBridgeSaved") : t("chatBridgeSavedCleared"));
+        return true;
+      } catch (error) {
+        setMessage(error instanceof Error && error.message ? error.message : t("saveFailed"));
+        return false;
+      }
+    }
+
     async function runBridgeAction({ form, draft, action, setMessage, refreshStatus, t }) {
       setMessage("");
       try {
-        if (!form?.state?.writable || typeof form.mutate !== "function") throw new Error(t("saveFailed"));
-        const chatBridgeChatUrl = String(draft.chatBridgeChatUrl || "").trim();
-        if (chatBridgeChatUrl) {
-          let url;
-          try { url = new URL(chatBridgeChatUrl); } catch {}
-          if (!url || url.protocol !== "https:" || !["chatgpt.com", "www.chatgpt.com"].includes(url.hostname.toLowerCase())
-            || url.username || url.password || url.pathname.startsWith("/auth")
-            || url.pathname.startsWith("/plugins") || url.pathname.startsWith("/#settings")) {
-            throw new Error(t("chatBridgeInvalidUrl"));
-          }
-        }
-        const chatBridgeDebugPort = Number(draft.chatBridgeDebugPort);
-        if (!Number.isInteger(chatBridgeDebugPort) || chatBridgeDebugPort < 1024 || chatBridgeDebugPort > 65535) {
-          throw new Error(t("chatBridgeInvalidPort"));
-        }
-        const saved = await form.mutate([
-          { op: "set", path: ["chatBridgeEnabled"], value: draft.chatBridgeEnabled !== false },
-          { op: "set", path: ["chatBridgeChatUrl"], value: chatBridgeChatUrl },
-          { op: "set", path: ["chatBridgeDebugPort"], value: chatBridgeDebugPort },
-        ], form.state.revision);
-        if (!saved) throw new Error(t("saveFailed"));
+        await persistBridgeSettings({ form, draft, t });
         const result = await action();
         if (!result?.ok) throw new Error(result?.message || t("chatBridgeUnavailable"));
         return true;
@@ -415,6 +545,55 @@ window.__ModuleLoader__.load({
       } finally {
         try { await refreshStatus?.(); } catch {}
       }
+    }
+
+    const NOTIFICATION_SUMMARY_LIMIT = 200;
+    const NOTIFICATION_DISPLAY_LIMIT = 20;
+    const NOTIFICATION_SECRET_PATTERNS = [
+      /\b(?:bearer|token|api[_-]?key|apikey|secret|cookie|password|passwd|authorization)\b\s*[:=]?\s*[A-Za-z0-9._~+/=-]{6,}/giu,
+      /\b(?:sk|ghp|gho|ghs|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{8,}\b/gu,
+      /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{4,}\b/gu,
+      /\b[0-9a-f]{32,}\b/giu,
+      /\b(?=[A-Za-z0-9+/]{40,}={0,2}\b)(?=[^ ]*[0-9])(?=[^ ]*[A-Za-z])[A-Za-z0-9+/]{40,}={0,2}/gu,
+    ];
+
+    /**
+     * Second-pass redaction for the short local preview. The backend already redacts
+     * secrets; this keeps a token, cookie, key or long opaque blob out of the DOM even
+     * if one ever reaches the payload, and caps the length at 500 characters.
+     */
+    function sanitizeNotificationSummary(value, limit = NOTIFICATION_SUMMARY_LIMIT) {
+      if (typeof value !== "string") return "";
+      let text = value.replace(/\s+/gu, " ").trim();
+      if (!text) return "";
+      for (const pattern of NOTIFICATION_SECRET_PATTERNS) text = text.replace(pattern, "[redacted]");
+      text = text.replace(/\s+/gu, " ").trim();
+      const max = Math.min(Number.isFinite(limit) ? limit : NOTIFICATION_SUMMARY_LIMIT, 500);
+      return text.length > max ? `${text.slice(0, Math.max(max - 1, 0))}…` : text;
+    }
+
+    function shortTaskId(value) {
+      const text = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+      if (!text) return "--";
+      return text.length > 8 ? text.slice(-8) : text;
+    }
+
+    function formatNotificationTime(value) {
+      if (typeof value !== "string" || !value.trim()) return "--";
+      const parsed = new Date(value.trim());
+      if (Number.isNaN(parsed.getTime())) return value.trim().slice(0, 32);
+      return parsed.toLocaleString();
+    }
+
+    function notificationItems(payload) {
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      return items.filter((item) => item !== null && typeof item === "object");
+    }
+
+    function notificationUnreadCount(payload) {
+      const reported = Number(payload?.unreadCount);
+      if (Number.isFinite(reported) && reported >= 0) return reported;
+      return notificationItems(payload).filter((item) => item.read === false).length;
     }
 
     function StatusLine({ label, value, display }) {
@@ -467,6 +646,10 @@ window.__ModuleLoader__.load({
       const [workspaceMessage, setWorkspaceMessage] = useState("");
       const [bridgeMessage, setBridgeMessage] = useState("");
       const [bridgeBusy, setBridgeBusy] = useState(false);
+      const [bridgeSaving, setBridgeSaving] = useState(false);
+      const [notifications, setNotifications] = useState(undefined);
+      const [notificationMessage, setNotificationMessage] = useState("");
+      const [notificationBusy, setNotificationBusy] = useState(false);
 
       const workspaceSnapshot = useSyncExternalStore(
         actions.subscribeWorkspaces,
@@ -553,6 +736,26 @@ window.__ModuleLoader__.load({
         return () => window.clearInterval(timer);
       }, []);
 
+      const refreshNotifications = async () => {
+        try {
+          setNotifications(await actions.taskNotifications());
+          setNotificationMessage("");
+        } catch (error) {
+          setNotifications(undefined);
+          setNotificationMessage(error instanceof Error && error.message
+            ? error.message
+            : t("taskNotificationsUnavailable"));
+        }
+      };
+
+      // The task-notification centre is a local Host Remote read: it runs only while this
+      // settings page is mounted and never polls Cloud or Worker tasks on its own.
+      useEffect(() => {
+        void refreshNotifications();
+        const timer = window.setInterval(() => { void refreshNotifications(); }, 5000);
+        return () => window.clearInterval(timer);
+      }, []);
+
       const endpointValid = /^https:\/\//u.test(draft.endpoint.trim());
       const canWrite = Boolean(form?.state?.writable);
 
@@ -595,6 +798,16 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const performBridgeSave = async () => {
+        if (bridgeSaving) return false;
+        setBridgeSaving(true);
+        try {
+          return await saveBridgeBinding({ form, draft, setMessage: setBridgeMessage, t });
+        } finally {
+          setBridgeSaving(false);
+        }
+      };
+
       const performBridgeAction = async (action) => {
         if (bridgeBusy) return;
         setBridgeBusy(true);
@@ -602,6 +815,24 @@ window.__ModuleLoader__.load({
           await runBridgeAction({ form, draft, action, setMessage: setBridgeMessage, refreshStatus, t });
         } finally {
           setBridgeBusy(false);
+        }
+      };
+
+      const markAllNotificationsRead = async () => {
+        if (notificationBusy) return;
+        setNotificationBusy(true);
+        setNotificationMessage("");
+        try {
+          const result = await actions.markTaskNotificationsRead();
+          if (result?.ok === false) throw new Error(t("taskNotificationsMarkFailed"));
+          await refreshNotifications();
+          setNotificationMessage(t("taskNotificationsMarkedAll"));
+        } catch (error) {
+          setNotificationMessage(error instanceof Error && error.message
+            ? error.message
+            : t("taskNotificationsMarkFailed"));
+        } finally {
+          setNotificationBusy(false);
         }
       };
 
@@ -821,6 +1052,52 @@ window.__ModuleLoader__.load({
           : connectionState === "connecting" ? t("connectionConnecting")
             : connectionState === "failed" ? t("connectionFailed") : t("connectionUnpaired");
 
+      const savedBridgeSettings = form?.state?.value && typeof form.state.value === "object"
+        ? form.state.value
+        : null;
+      const savedDefaultChatUrl = String(
+        (savedBridgeSettings ? savedBridgeSettings.chatBridgeChatUrl : initial.chatBridgeChatUrl) ?? "",
+      ).trim();
+      const bridgeDraftDirty = Boolean(savedBridgeSettings) && !bridgeSettingsMatch(savedBridgeSettings, {
+        chatBridgeEnabled: draft.chatBridgeEnabled !== false,
+        chatBridgeChatUrl: draft.chatBridgeChatUrl.trim(),
+        chatBridgeDebugPort: Number(draft.chatBridgeDebugPort),
+      });
+
+      const allNotifications = notificationItems(notifications);
+      const visibleNotifications = allNotifications.slice(0, NOTIFICATION_DISPLAY_LIMIT);
+      const unreadCount = notificationUnreadCount(notifications);
+      const activeTaskCount = Number(notifications?.activeTaskCount);
+      const notificationActiveDisplay = Number.isFinite(activeTaskCount) && activeTaskCount >= 0
+        ? String(activeTaskCount)
+        : "--";
+
+      const renderNotification = (item, index) => {
+        const failed = item.terminalState === "failed";
+        const summary = sanitizeNotificationSummary(item.summary);
+        return h("div", {
+          key: typeof item.key === "string" && item.key ? item.key : `${String(item.taskId ?? "task")}-${String(index)}`,
+          style: {
+            display: "grid",
+            gap: 4,
+            padding: 10,
+            borderRadius: 8,
+            background: "var(--dsw-color-bg-secondary, rgba(127,127,127,.06))",
+          },
+        },
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("span", { style: rowStyle },
+              h(StateDot, { state: failed ? "error" : "done" }),
+              h("strong", null, failed ? t("taskNotificationsFailed") : t("taskNotificationsCompleted")),
+              item.read === false ? h("span", { style: mutedStyle }, t("taskNotificationsUnread")) : null,
+            ),
+            h("span", { style: mutedStyle }, formatNotificationTime(item.at)),
+          ),
+          h("div", { style: rowStyle }, h("code", { style: { fontSize: 12 } }, shortTaskId(item.taskId))),
+          summary ? h("p", { style: mutedStyle }, summary) : null,
+        );
+      };
+
       return h("div", { style: { display: "grid", gap: 16, maxWidth: 920 } },
         h("section", { style: sectionStyle },
           h("h3", { style: { margin: 0 } }, t("deviceConnection")),
@@ -932,6 +1209,11 @@ window.__ModuleLoader__.load({
           h("div", { style: rowStyle },
             h(Button, {
               variant: "primary",
+              disabled: bridgeSaving || !canWrite,
+              onClick: () => void performBridgeSave(),
+            }, bridgeSaving ? t("chatBridgeSavingBinding") : t("chatBridgeSaveBinding")),
+            h(Button, {
+              variant: "outline",
               disabled: bridgeBusy,
               onClick: () => void performBridgeAction(actions.openBridgeBrowser),
             }, t("chatBridgeOpen")),
@@ -941,6 +1223,7 @@ window.__ModuleLoader__.load({
               onClick: () => void performBridgeAction(actions.testBridge),
             }, t("chatBridgeTest")),
           ),
+          bridgeDraftDirty ? h("p", { style: mutedStyle }, t("chatBridgeUnsaved")) : null,
           bridgeMessage ? h("p", { role: "status", style: mutedStyle }, bridgeMessage) : null,
           h("div", { style: gridStyle },
             h(StatusLine, {
@@ -950,9 +1233,10 @@ window.__ModuleLoader__.load({
             }),
             h(StatusLine, {
               label: t("chatBridgeBinding"),
-              value: status?.chatBridge?.bound ? "bound" : "unbound",
-              display: t(status?.chatBridge?.bound ? "chatBridgeBound" : "chatBridgeUnbound"),
+              value: savedDefaultChatUrl ? "default-set" : "default-unset",
+              display: t(savedDefaultChatUrl ? "chatBridgeDefaultSet" : "chatBridgeDefaultUnset"),
             }),
+            h("p", { style: mutedStyle }, t("chatBridgeRoutingHint")),
             status?.chatBridge?.lastSentAt
               ? h("p", { style: mutedStyle }, `Last sent: ${status.chatBridge.lastSentAt}`)
               : null,
@@ -960,6 +1244,34 @@ window.__ModuleLoader__.load({
               ? h("p", { role: "status", style: mutedStyle }, status.chatBridge.lastError)
               : null,
           ),
+        ),
+
+        h("section", { style: sectionStyle },
+          h("h3", { style: { margin: 0 } }, t("taskNotifications")),
+          h("p", { style: mutedStyle }, t("taskNotificationsHint")),
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("span", null, t("taskNotificationsUnread")),
+            h("strong", null, String(unreadCount)),
+          ),
+          h("div", { style: { ...rowStyle, justifyContent: "space-between" } },
+            h("span", null, t("taskNotificationsActive")),
+            h("strong", null, notificationActiveDisplay),
+          ),
+          h("p", { style: mutedStyle }, t("taskNotificationsActiveHint")),
+          h("div", { style: rowStyle },
+            h(Button, {
+              variant: "outline",
+              disabled: notificationBusy || unreadCount === 0,
+              onClick: () => void markAllNotificationsRead(),
+            }, notificationBusy ? t("taskNotificationsMarking") : t("taskNotificationsMarkAll")),
+          ),
+          notificationMessage ? h("p", { role: "status", style: mutedStyle }, notificationMessage) : null,
+          notifications === undefined
+            ? h("p", { style: mutedStyle }, t("taskNotificationsLoading"))
+            : visibleNotifications.length === 0
+              ? h("p", { style: mutedStyle }, t("taskNotificationsEmpty"))
+              : h("div", { style: gridStyle }, ...visibleNotifications.map(renderNotification)),
+          h("p", { style: mutedStyle }, t("taskNotificationsLocalOnly")),
         ),
 
         h("section", { style: sectionStyle },
@@ -1216,6 +1528,24 @@ window.__ModuleLoader__.load({
           if (!response.ok) throw new Error(hostRemoteFailure(response.error, "testBridge"));
           return response.value;
         },
+        async taskNotifications() {
+          const response = await ctx.remote.deepseekWorkerConnector.taskNotifications();
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "taskNotifications"));
+          return response.value;
+        },
+        /**
+         * `keys` is optional: omitting it (or an empty list) asks the backend to mark
+         * every notification read. One argument is always sent because the Remote
+         * contract declares one business parameter.
+         */
+        async markTaskNotificationsRead(keys) {
+          const request = Array.isArray(keys) && keys.length > 0
+            ? { keys: keys.map((key) => String(key)) }
+            : undefined;
+          const response = await ctx.remote.deepseekWorkerConnector.markTaskNotificationsRead(request);
+          if (!response.ok) throw new Error(hostRemoteFailure(response.error, "markTaskNotificationsRead"));
+          return response.value;
+        },
         async describeCredential() {
           const response = await ctx.remote.credentials.describe([TOKEN_REF]);
           if (!response.ok) throw new Error(credentialFailure(response.error, "describe"));
@@ -1245,6 +1575,17 @@ window.__ModuleLoader__.load({
         restorePairingConnection,
         chatBridgeStatusKey,
         runBridgeAction,
+        isBindableChatUrl,
+        normalizeBridgeSettings,
+        persistBridgeSettings,
+        saveBridgeBinding,
+        bridgeSettingsMatch,
+        sanitizeNotificationSummary,
+        notificationItems,
+        notificationUnreadCount,
+        shortTaskId,
+        formatNotificationTime,
+        TASK_NOTIFICATIONS_READ_OPTIONS,
       },
       async apply(ctx) {
         const disposeRemote = await ctx.remote.$mount(contribution);
