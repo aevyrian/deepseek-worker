@@ -113,6 +113,8 @@ const requests = [];
 const originalFetch = globalThis.fetch;
 const outboxDirectory = await mkdtemp(join(tmpdir(), "dsw-host-probe-"));
 process.env.DEEPSEEK_WORKER_BRIDGE_WAKE_OUTBOX_PATH = join(outboxDirectory, "service-outbox.json");
+// Keep task-completion notifications out of the real Connector state directory.
+process.env.DEEPSEEK_WORKER_TASK_NOTIFICATIONS_PATH = join(outboxDirectory, "task-notifications.json");
 
 globalThis.fetch = async (url, init = {}) => {
   const parsed = new URL(url);
@@ -391,4 +393,5 @@ try {
   await ctx.dispose();
   await rm(outboxDirectory, { recursive: true, force: true });
   delete process.env.DEEPSEEK_WORKER_BRIDGE_WAKE_OUTBOX_PATH;
+  delete process.env.DEEPSEEK_WORKER_TASK_NOTIFICATIONS_PATH;
 }
