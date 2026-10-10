@@ -1,6 +1,6 @@
 {
   "name": "deepseek-worker-connector",
-  "version": "0.7.13",
+  "version": "0.7.14",
   "private": true,
   "description": "让 ChatGPT 连接并指挥本机 DeepSeek Harness 执行 Workspace 任务的 Connector。",
   "type": "module",
