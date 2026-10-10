@@ -118,7 +118,7 @@ async function mountClient({
         assert.equal(contribution.package, "deepseek-worker-connector");
         assert.deepEqual(
           Array.from(contribution.descriptors, (descriptor) => descriptor.method),
-          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate", "openBridgeBrowser", "testBridge"],
+          ["status", "generateToken", "test", "beginPairing", "pairingStatus", "disconnectPairing", "checkForUpdates", "forceUpdate", "openBridgeBrowser", "testBridge", "taskNotifications", "markTaskNotificationsRead"],
         );
         mounted = true;
         return async () => { remoteDisposed = true; mounted = false; };

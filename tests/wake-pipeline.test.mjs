@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 
-test("terminal upload and wake persistence boundaries preserve terminal truth", () => {
+test("terminal upload and wake persistence boundaries preserve terminal truth", (t) => {
+  const notificationDirectory = mkdtempSync(join(tmpdir(), "dsw-wake-pipeline-notifications-"));
+  t.after(() => rmSync(notificationDirectory, { recursive: true, force: true }));
   const probe = `
+process.env.DEEPSEEK_WORKER_TASK_NOTIFICATIONS_PATH = ${JSON.stringify(join(notificationDirectory, "task-notifications.json"))};
 import { processLease } from ${JSON.stringify(pathToFileURL(join(repositoryRoot, "index.js")).href)};
 const scenarios = ${JSON.stringify([
     { name: "result-success", resultStatus: 200 },

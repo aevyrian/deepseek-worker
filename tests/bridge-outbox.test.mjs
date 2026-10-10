@@ -3,8 +3,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { BridgeWakeOutbox, buildLocalWakeMessage, localWakeMessageKey } from "../lib/bridge-outbox.mjs";
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -30,6 +30,12 @@ async function runConnectorBridgeIntegration({ filePath, config, response, termi
   });
   assert.equal(child.status, 0, child.stderr);
   return JSON.parse(child.stdout);
+}
+
+async function abandonLegacyAttempt(filePath) {
+  const db = JSON.parse(await readFile(filePath, 'utf8'));
+  for (const row of db.deliveries) delete row.send_owner_pid;
+  await writeFile(filePath, JSON.stringify(db));
 }
 
 async function temporaryOutbox(t) {
@@ -58,6 +64,7 @@ test("outbox persists the required record fields and quarantines an interrupted 
   const attempt = await firstProcess.beginAttempt(queued.message_key);
   assert.equal(attempt.delivery_state, "sending");
 
+  await abandonLegacyAttempt(filePath);
   const restarted = new BridgeWakeOutbox({ filePath, now: () => "2026-10-06T00:01:00.000Z" });
   await restarted.initialize();
   assert.equal((await restarted.listPending()).length, 0);
@@ -248,7 +255,8 @@ test("legacy uncertain Cloud rows acquire durable reconciliation fields without 
 
   now = persisted.next_reconcile_at;
   const restarted = new BridgeWakeOutbox({ filePath, now: () => now });
-  assert.equal((await restarted.listUncertain()).length, 1, "the legacy record survives the in-place format extension");
+  assert.equal((await restarted.listUncertain()).length, 0, "manual intervention boundary suppresses automatic checks");
+  assert.equal((await restarted.findByMessageKey(row.message_key)).delivery_state, "uncertain", "the legacy record remains durable");
 });
 
 test("reconciliation lock survives restart until its bounded lease expires", async (t) => {
@@ -288,4 +296,168 @@ test("Cloud recovery enriches the same targetless failed Outbox row without rese
   assert.equal(enriched.row.last_failure, before.last_failure);
   assert.equal(enriched.row.next_attempt_at, before.next_attempt_at);
   assert.equal(enriched.row.delivery_state, before.delivery_state);
+});
+
+test("independent outbox instances serialize enqueue and never quarantine a live sender", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  const a = new BridgeWakeOutbox({ filePath });
+  const b = new BridgeWakeOutbox({ filePath });
+  await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).enqueueLocal({ projectId: "parallel", taskId: `task-${i}`, terminalState: "completed" })));
+  assert.equal((await a.listPending()).length, 20);
+  const row = (await a.listPending())[0];
+  await a.beginAttempt(row.message_key);
+  const freshInstance = new BridgeWakeOutbox({ filePath });
+  assert.equal((await freshInstance.findByMessageKey(row.message_key)).delivery_state, "sending");
+  assert.equal((await freshInstance.listUncertain()).length, 0);
+  assert.equal(await freshInstance.beginAttempt(row.message_key), null);
+});
+
+test("a genuinely exited send process recovers as uncertain without resending", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  const code = `const { BridgeWakeOutbox } = await import('./lib/bridge-outbox.mjs'); const box = new BridgeWakeOutbox({filePath:${JSON.stringify(filePath)}}); const row = await box.enqueueLocal({projectId:'exit-project',taskId:'exit-task',terminalState:'completed'}); await box.beginAttempt(row.message_key);`;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", code], { cwd: repositoryRoot, encoding: "utf8" });
+  assert.equal(child.status, 0, child.stderr);
+  const box = new BridgeWakeOutbox({ filePath });
+  const [row] = await box.listUncertain();
+  assert.equal(row.last_error, "process_restarted_during_send");
+  assert.equal(row.attempts, 1);
+  assert.equal((await box.listPending()).length, 0);
+});
+
+test("separate processes preserve concurrent durable enqueues", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  await Promise.all(Array.from({ length: 3 }, (_, worker) => new Promise((done, reject) => {
+    const code = `const { BridgeWakeOutbox } = await import('./lib/bridge-outbox.mjs'); const box = new BridgeWakeOutbox({filePath:${JSON.stringify(filePath)}}); for(let i=0;i<8;i++) await box.enqueueLocal({projectId:'multi-process',taskId:'worker-${worker}-'+i,terminalState:'completed'});`;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", code], { cwd: repositoryRoot, stdio: ["ignore", "ignore", "pipe"] });
+    let errors = "";
+    child.stderr.on("data", (chunk) => { errors += chunk; });
+    child.on("error", reject);
+    child.on("exit", (status) => status === 0 ? done() : reject(new Error(errors)));
+  })));
+  const box = new BridgeWakeOutbox({ filePath });
+  assert.equal((await box.listPending()).length, 24);
+});
+
+test("more than 2000 settled receipts retain old dedup keys and pending Cloud ACKs", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  const box = new BridgeWakeOutbox({ filePath });
+  const old = await box.enqueueLocal({ projectId: "receipts", taskId: "old", terminalState: "completed" });
+  await box.markDelivered(old.message_key);
+  const receipt = await box.findByMessageKey(old.message_key);
+  const rows = [receipt, ...Array.from({ length: 2000 }, (_, i) => ({ ...receipt, message_key: `receipt-${i}`, task_id: `task-${i}` }))];
+  rows[1] = { ...rows[1], source: "cloud", cloud_ack_state: "pending", delivery_id: "unacked", event_id: "event", cloud_ack_attempts: 0 };
+  await writeFile(filePath, JSON.stringify({ version: 1, deliveries: rows }));
+  const replay = await box.enqueueLocal({ projectId: "receipts", taskId: "old", terminalState: "completed" });
+  assert.equal(replay.delivery_state, "delivered");
+  assert.equal((await box.listPending()).length, 0);
+  assert.equal((await box.listPendingCloudAcks()).length, 1);
+  assert.equal(JSON.parse(await readFile(filePath, "utf8")).deliveries.length, 2001);
+});
+
+test("reconciliation stops at both count and elapsed-time boundaries and retains identity", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  let now = "2026-10-09T00:00:00.000Z";
+  const box = new BridgeWakeOutbox({ filePath, now: () => now, manualReviewThreshold: 2, reconcileBaseMs: 0, recoveryWindowMs: 1000 });
+  const row = await box.enqueueLocal({ projectId: "bound", taskId: "count", terminalState: "completed" });
+  await box.markFailed(row.message_key, Object.assign(new Error("uncertain"), { code: "bridge_send_uncertain" }));
+  for (let i = 0; i < 2; i++) { assert.ok(await box.beginReconciliation(row.message_key)); await box.recordReconciliation(row.message_key, { reason: "target_missing" }); }
+  assert.equal(await box.beginReconciliation(row.message_key), null);
+  const elapsed = await box.enqueueLocal({ projectId: "bound", taskId: "time", terminalState: "completed" });
+  await box.markFailed(elapsed.message_key, Object.assign(new Error("uncertain"), { code: "bridge_send_uncertain" }));
+  now = "2026-10-09T00:00:01.000Z";
+  assert.equal(await box.beginReconciliation(elapsed.message_key), null);
+  assert.equal((await box.findByMessageKey(elapsed.message_key)).reconcile_manual_intervention, true);
+  assert.equal((await box.listUncertain()).length, 0);
+  assert.equal((await box.findByMessageKey(row.message_key)).delivery_state, "uncertain");
+});
+
+test("pending retries and ACK-only retries stop at count and time boundaries without pretending success", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  let now = "2026-10-09T00:00:00.000Z";
+  const box = new BridgeWakeOutbox({ filePath, now: () => now, manualReviewThreshold: 2, retryBaseMs: 0, recoveryWindowMs: 1000 });
+  const pending = await box.enqueueLocal({ projectId: "bounded", taskId: "pending-count", terminalState: "completed" });
+  for (let i = 0; i < 2; i++) { assert.ok(await box.beginAttempt(pending.message_key)); await box.markFailed(pending.message_key, new Error("login required")); }
+  assert.equal(await box.beginAttempt(pending.message_key), null);
+  assert.equal((await box.findByMessageKey(pending.message_key)).delivery_manual_intervention, true);
+  const time = await box.enqueueLocal({ projectId: "bounded", taskId: "pending-time", terminalState: "completed" });
+  await box.beginAttempt(time.message_key); await box.markFailed(time.message_key, new Error("offline"));
+  const cloud = (await box.adoptCloudDelivery({ deliveryId: "ack-bounded", messageKey: "ack-bounded", projectId: "bounded", taskId: "ack-count", eventId: "event", eventName: "task.completed", revision: 1 })).row;
+  await box.markDelivered(cloud.message_key);
+  for (let i = 0; i < 2; i++) { assert.ok(await box.beginCloudAck(cloud.message_key)); await box.failCloudAck(cloud.message_key, new Error("offline")); }
+  assert.equal(await box.beginCloudAck(cloud.message_key), null);
+  assert.equal((await box.findByMessageKey(cloud.message_key)).cloud_ack_manual_intervention, true);
+  const ackTime = (await box.adoptCloudDelivery({ deliveryId: "ack-time", messageKey: "ack-time", projectId: "bounded", taskId: "ack-time", eventId: "time-event", eventName: "task.completed", revision: 1 })).row;
+  await box.markDelivered(ackTime.message_key); await box.beginCloudAck(ackTime.message_key); await box.failCloudAck(ackTime.message_key, new Error("offline"));
+  now = "2026-10-09T00:00:01.000Z";
+  assert.equal(await box.beginAttempt(time.message_key), null);
+  assert.equal(await box.beginCloudAck(ackTime.message_key), null);
+  assert.equal((await box.listPending()).length, 0);
+  assert.equal((await box.listPendingCloudAcks()).length, 0);
+  assert.equal((await box.findByMessageKey(cloud.message_key)).cloud_ack_state, "pending");
+  assert.equal((await box.findByMessageKey(cloud.message_key)).orchestrator_handled, null);
+});
+
+test("same-key local adoption becomes Cloud ACK work without resetting its delivery", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  const box = new BridgeWakeOutbox({ filePath });
+  const local = await box.enqueueLocal({ projectId: "same-key", taskId: "task", terminalState: "completed" });
+  await box.markDelivered(local.message_key);
+  const adopted = await box.adoptCloudDelivery({ deliveryId: "formal", messageKey: local.message_key, projectId: "same-key", taskId: "task", eventId: "event", eventName: "task.completed", revision: 1 });
+  assert.equal(adopted.alreadyDelivered, true);
+  assert.equal(adopted.row.source, "cloud");
+  assert.equal((await box.listPendingCloudAcks())[0].message_key, local.message_key);
+});
+
+test("Windows backup-only recovery survives a second process crash before committing the canonical file", async (t) => {
+  const { filePath, directory } = await temporaryOutbox(t);
+  const box = new BridgeWakeOutbox({ filePath, platform: "win32" });
+  const receipt = await box.enqueueLocal({ projectId: "second-crash", taskId: "task", terminalState: "completed" });
+  await box.markDelivered(receipt.message_key);
+  await (await import("node:fs/promises")).rename(filePath, `${filePath}.bak`);
+  const loaderPath = join(directory, "crash-loader.mjs");
+  await writeFile(loaderPath, `export async function load(url, context, next) { const result = await next(url, context); if (url.endsWith('/lib/bridge-outbox.mjs')) { result.source = String(result.source).replace('await rename(temporary, this.filePath);', 'process.exit(73);'); } return result; }`);
+  const code = `const { BridgeWakeOutbox } = await import('./lib/bridge-outbox.mjs'); await new BridgeWakeOutbox({filePath:${JSON.stringify(filePath)},platform:'win32'}).initialize();`;
+  const child = spawnSync(process.execPath, ["--loader", pathToFileURL(loaderPath).href, "--input-type=module", "-e", code], { cwd: repositoryRoot, encoding: "utf8" });
+  assert.equal(child.status, 73, child.stderr);
+  assert.equal(JSON.parse(await readFile(`${filePath}.bak`, "utf8")).deliveries[0].message_key, receipt.message_key);
+  const afterSecondCrash = new BridgeWakeOutbox({ filePath, platform: "win32" });
+  assert.equal((await afterSecondCrash.enqueueLocal({ projectId: "second-crash", taskId: "task", terminalState: "completed" })).delivery_state, "delivered");
+  assert.equal((await afterSecondCrash.listPending()).length, 0);
+});
+
+test("legacy missing stages remain unknown and a live reused-owner claim reaches manual review", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  let now = "2026-10-09T00:00:00.000Z";
+  const box = new BridgeWakeOutbox({ filePath, now: () => now, recoveryWindowMs: 1000 });
+  const row = await box.enqueueLocal({ projectId: "owner", taskId: "task", terminalState: "completed" });
+  await box.beginAttempt(row.message_key);
+  const db = JSON.parse(await readFile(filePath, "utf8"));
+  for (const field of ["delivery_stage", "message_visible", "transport_acked", "draft_verified", "submit_attempted"]) delete db.deliveries[0][field];
+  await writeFile(filePath, JSON.stringify(db));
+  assert.equal((await box.findByMessageKey(row.message_key)).delivery_stage, null);
+  assert.equal((await box.findByMessageKey(row.message_key)).message_visible, null);
+  now = "2026-10-09T00:00:01.000Z";
+  assert.equal((await box.listUncertain()).length, 0);
+  const retained = await box.findByMessageKey(row.message_key);
+  assert.equal(retained.delivery_state, "sending");
+  assert.equal(retained.delivery_manual_intervention, true);
+});
+
+test("durable submit intent makes an unclassified failure uncertain and survives a real process exit", async (t) => {
+  const { filePath } = await temporaryOutbox(t);
+  const box = new BridgeWakeOutbox({ filePath });
+  const row = await box.enqueueLocal({ projectId: "intent", taskId: "generic-error", terminalState: "completed" });
+  await box.beginAttempt(row.message_key);
+  await box.recordSendProgress(row.message_key, "draft_verified");
+  await box.recordSendProgress(row.message_key, "submit_attempted");
+  await box.markFailed(row.message_key, new Error("unexpected adapter failure"));
+  assert.equal((await box.findByMessageKey(row.message_key)).send_state, "uncertain");
+  assert.equal((await box.listPending()).length, 0);
+
+  const code = `const { BridgeWakeOutbox } = await import('./lib/bridge-outbox.mjs'); const box = new BridgeWakeOutbox({filePath:${JSON.stringify(filePath)}}); const row = await box.enqueueLocal({projectId:'intent',taskId:'real-exit',terminalState:'completed'}); await box.beginAttempt(row.message_key); await box.recordSendProgress(row.message_key,'draft_verified'); await box.recordSendProgress(row.message_key,'submit_attempted');`;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", code], { cwd: repositoryRoot, encoding: "utf8" });
+  assert.equal(child.status, 0, child.stderr);
+  const recovered = (await box.listUncertain()).find((item) => item.task_id === "real-exit");
+  assert.equal(recovered.delivery_stage, "submit_attempted");
+  assert.equal(recovered.send_state, "uncertain");
 });

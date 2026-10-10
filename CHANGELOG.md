@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.14 — Task Notifications and No-Blank Launch Preview
+
+> **Prerelease — NOT a stable release.** This preview builds on the 0.7.13 P0 Reliability Preview and adds local task-completion notifications, a notification centre UI and a no-blank browser launch. It is covered by 416/416 simulated tests (370 in 0.7.13), but real end-to-end acceptance (real target conversation message, real ChatGPT result consumption and `ack_project_event`) has **still not** been validated, so the stable channel remains **NO-GO** and this build is for prerelease testing only. Installing it replaces the running Connector generation: **a Harness restart is required before the new build is loaded.**
+
+- Persist local task-completion notifications for finished Connector tasks (`lib/task-notifications.mjs`), so a finished task leaves a durable local record instead of relying on a live wake alone. Cherry-picked from `caf3dba55e0f44629401b5c85e8fbf72f8abe6ba`.
+- Add an explicit Save binding action and a task-notification centre to the Connector UI (`client.js`). Cherry-picked from `fbb4b750d9e9c9a6185292d6d6ce835b5404643d`.
+- Start the dedicated CDP browser on the ChatGPT home page instead of `about:blank`: the start URL is the constant `BRIDGE_START_URL` built by `browserLaunchArgs`, `openHome` no longer selects the launch URL, and a bound conversation URL is never opened at launch. Cherry-picked from `2315883d2fd3c9f20abc8826a6c8ce312e533d75`; the test-file conflict was resolved by keeping every 0.7.13 test and appending the new cold-start tests unchanged.
+- All 0.7.13 P0 reliability behaviour (bootstrap health isolation, read-only reconciliation, `wake_target` precedence, draft protection, Outbox phase recovery, bounded retries) is unchanged.
+
+Deferred, not part of this preview:
+
+- `6c19df6` (wake the durable transport on ready without requiring a global binding) conflicts semantically with the 0.7.13 bootstrap logic and will be re-implemented on top of it separately.
+- Uncommitted tab-isolation work is not included.
+## 0.7.13 — P0 Reliability Preview
+
+> **Prerelease — NOT a stable release.** This is the P0 Reliability Preview for the Chat Bridge wake path. The fixes below are covered by 370/370 simulated tests, but real end-to-end acceptance (real target conversation message, real ChatGPT result consumption and `ack_project_event`) has **not** been validated, so this release is **NO-GO for stable** and is published as a GitHub prerelease only. Installing it replaces the running Connector generation: **a Harness restart is required before the new build is loaded.** Do not treat it as an A/B-verified release.
+
+- Align send and reconcile on one conversation identity: trailing slashes, harmless query parameters, a `www.` host and the `/g/<project>/c/<id>` spelling of the same conversation id all resolve to the same target, while a different conversation id, the home page, an auth page and non-HTTPS URLs fail closed. `reconcileDelivery` no longer reports `target_missing` for a tab that is open under a cosmetic URL variant.
+- Keep `wake_target` above the global `chatBridgeChatUrl` in both paths, and keep reconciliation strictly read-only: it never navigates, never inserts, never clicks, never opens a tab to search, and stops with an explicit reason instead of risking the current draft.
+- Fix the send-control `disabled` test: the previous `||`/`&&` precedence reported a disabled `data-testid="send-button"` as enabled, and the anchored label list missed the real `发送消息` label. A control now counts as the send control only when it is visible, enabled, near the composer, not a stop/voice/attach/dictate/share control, and its label really names the send action.
+- Remove the blind Enter fallback. When no safe clickable control appears, the verified draft is retained and reported instead of being submitted through an unverified key event; a draft dropped by a hydration re-render is re-inserted at most three times before anything is submitted.
+- Wait for page hydration and a stable toolbar (up to 15s, three identical reads) before clicking, never click while the conversation is still generating or a stale Stop control is on screen, and extend post-click confirmation to 6s. A confirmation timeout still holds the `MESSAGE_KEY` for read-only reconciliation and never submits twice.
+- Enrich delivery diagnostics with draft retention, draft insertions, send-control presence and enabled state, submit attempt, conversation visibility and manual-intervention flags, and persist the reconcile-side fields without a database migration.
+- Add regression coverage for label-only and disabled real DOM send buttons, slow hydration, dropped-draft re-insertion, in-progress generation, lookalike `Send feedback` controls, `target_missing` plus URL variants, wrong-chat fail-closed targeting, `wake_target` precedence, single bounded safe-draft recovery, non-retained drafts and confirmation-timeout holds.
+
+Scope of this preview, in the order the wake path runs:
+
+- **Bootstrap browser health only** — the startup health check no longer depends on, or disturbs, the bound conversation.
+- **No tab stealing** — reconciliation and target lookup are strictly read-only and never navigate, insert, click or open a tab.
+- **`wake_target` as an independent target** — a per-delivery wake target outranks the global `chatBridgeChatUrl` instead of being merged with it.
+- **Draft protection** — no blind Enter fallback; a verified draft is retained rather than submitted through an unverified control, with a single bounded safe-draft recovery.
+- **Outbox phase crash recovery** — persisted sanitized phase diagnostics plus in-place record extension let an interrupted delivery be reconciled after restart instead of blindly resent.
+- **Dedupe, ACK identity and bounded retries** — one conversation identity across send and reconcile, a durable short lease, bounded exponential retry, and Cloud acknowledgement retried independently of the message.
+- **370/370 simulated tests pass**; real end-to-end A/B acceptance and ChatGPT `ack_project_event` remain unverified.
+
 ## 0.7.12 — Trusted Self-Update Source Recovery
 
 - Read the installed Git source from the active profile held by the official Harness Plugin Manager; `listBundles()` does not expose a source field.
